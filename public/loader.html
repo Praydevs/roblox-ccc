@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>loading</title>
+<style>
+  :root {
+    --bg: #08080a;
+    --fg: #d8d8dc;
+    --dim: #5a5a63;
+    --accent: #e63946;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 14px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  .bar {
+    height: 2px;
+    background: #16161a;
+    flex: none;
+  }
+  .bar > i {
+    display: block;
+    height: 100%;
+    width: 0%;
+    background: var(--accent);
+    transition: width 250ms linear;
+  }
+  header {
+    flex: none;
+    display: flex;
+    justify-content: space-between;
+    padding: 14px 20px 0;
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--dim);
+  }
+  #clock { color: var(--fg); font-variant-numeric: tabular-nums; }
+  main {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    padding: 0 20px 20px;
+    overflow: hidden;
+  }
+  #stream {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    line-height: 1.55;
+    white-space: pre;
+  }
+  #stream li { color: var(--dim); }
+  #stream li:last-child { color: var(--fg); }
+  #stream li.done { color: var(--accent); }
+  .cursor {
+    display: inline-block;
+    width: 7px;
+    height: 13px;
+    background: var(--fg);
+    vertical-align: -2px;
+    animation: blink 1.05s steps(1) infinite;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+</style>
+</head>
+<body>
+  <div class="bar"><i id="fill"></i></div>
+  <header>
+    <span>loading</span>
+    <span id="clock">5:00</span>
+  </header>
+  <main>
+    <ul id="stream"></ul>
+  </main>
+<script>
+  const DURATION = 5 * 60 * 1000;
+  const TICK = 620;
+
+  const start = performance.now();
+  const stream = document.getElementById('stream');
+  const clock = document.getElementById('clock');
+  const fill = document.getElementById('fill');
+
+  const pad = (n) => String(n).padStart(2, '0');
+
+  function note(elapsed) {
+    const left = Math.max(0, DURATION - elapsed);
+    const secs = Math.floor((left % 60000) / 1000);
+    clock.textContent = `${Math.floor(left / 60000)}:${pad(secs)}`;
+    fill.style.width = `${Math.min(100, (elapsed / DURATION) * 100).toFixed(2)}%`;
+  }
+
+  function line(text, cls) {
+    const li = document.createElement('li');
+    li.textContent = text;
+    if (cls) li.className = cls;
+    stream.appendChild(li);
+    while (stream.children.length > 400) stream.removeChild(stream.firstChild);
+    return li;
+  }
+
+  let tick = 0;
+  let timer = null;
+
+  function ticker() {
+    const elapsed = performance.now() - start;
+    note(elapsed);
+
+    if (elapsed >= DURATION) return finish();
+
+    const li = line('loading' + '.'.repeat(tick % 4));
+    if (tick % 4 === 0) {
+      li.appendChild(document.createElement('span')).className = 'cursor';
+    }
+    // only the newest line keeps the blinking cursor
+    const prev = li.previousElementSibling;
+    if (prev) prev.textContent = prev.textContent.replace(/\s+$/, '');
+
+    tick += 1;
+  }
+
+  function finish() {
+    clearInterval(timer);
+    note(DURATION);
+    const li = line('', 'done');
+    li.appendChild(document.createTextNode('done. '));
+    li.appendChild(document.createElement('span')).className = 'cursor';
+    ticker = () => {};
+  }
+
+  note(0);
+  line('loading');
+  timer = setInterval(ticker, TICK);
+</script>
+</body>
+</html>
