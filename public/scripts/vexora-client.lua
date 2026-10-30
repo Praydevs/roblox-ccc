@@ -527,11 +527,14 @@ local function openInventory()
     if screen and screen.Enabled ~= false then return screen end
 
     local button = findHudInventoryButton()
+    print("[vexora] inventory button: " .. (button and (button.Name .. "/" .. (buttonLabel(button) or "?")) or "not found"))
     if button then
         mousePress(button)
         task.wait(0.9)
     end
-    return inventoryScreen()
+    screen = inventoryScreen()
+    print("[vexora] inventory panel: " .. (screen and screen.Name or "not found"))
+    return screen
 end
 
 -- sticky read state: "seen" only turns true once a real collection was listed,
