@@ -235,15 +235,17 @@ def launch_url(cookie: str, place_id: str, job_id: str | None = None) -> str:
 
 # ---------- multiple windows ----------
 SINGLETON_MUTEX = "ROBLOX_singletonMutex"
-SINGLETON_EVENT = "ROBLOX_singletonEvent"
 
 
 class MultiInstance:
-    """Hold Roblox's single-instance objects so a second client can start.
+    """Hold Roblox's singleton mutex, created before any client starts.
 
-    The client opens a named mutex/event at startup and quits if it cannot. Owning
-    them here first is what every multi-instance launcher does; handles are closed
-    when the block exits or the process ends.
+    Only the mutex, and never owned: creating the singleton *event* or setting it
+    tells a running client that another instance launched - which is exactly how a
+    running window gets closed. So: mutex only, unsignaled, no ownership.
+
+    This has to be armed before the first client of the session starts. Arming it
+    while a client is already open does nothing useful and can cost you that window.
     """
 
     def __init__(self) -> None:
@@ -256,11 +258,8 @@ class MultiInstance:
             kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
             kernel32.CreateMutexW.restype = ctypes.c_void_p
             kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
-            kernel32.CreateEventW.restype = ctypes.c_void_p
-            kernel32.CreateEventW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_bool, ctypes.c_wchar_p]
-            mutex = kernel32.CreateMutexW(None, True, SINGLETON_MUTEX)
-            event = kernel32.CreateEventW(None, True, True, SINGLETON_EVENT)
-            self.handles = [h for h in (mutex, event) if h]
+            mutex = kernel32.CreateMutexW(None, False, SINGLETON_MUTEX)
+            self.handles = [mutex] if mutex else []
         except Exception:  # noqa: BLE001 - never block a launch over this
             self.handles = []
         return self
@@ -306,18 +305,67 @@ def launch_client(cookie: str, place: str, job: str | None = None, *, dry_run: b
         log(f"would launch: {url[:120]}...")
         return url
 
-    if multi:
+    # never touch the singleton objects while a client is running - doing that is
+    # what closes the window that was already open
+    armed = multi and before == 0
+    if multi and not armed:
+        log("a client is already open, so the lock is not armed; close it and launch "
+            "both accounts from here to get two windows")
+
+    if armed:
         with MultiInstance():
             open_protocol(url)
-            if wait_for_client(before, 12):
+            if wait_for_client(before, 15):
                 return url
-        log("no new window with the instance lock held - retrying without it")
+        log("no new window with the lock armed - retrying without it")
 
     open_protocol(url)
     if not wait_for_client(before, 20):
-        log("Roblox accepted the launch but no new RobloxPlayerBeta.exe appeared; "
-            "if a window only got focused, enable multi-instance or run the Store version")
+        log("the launch was accepted but no new RobloxPlayerBeta.exe appeared; if a "
+            "window only got focused, Windows blocked the second client for this session")
     return url
+
+
+def launch_many(accounts: list[dict], place: str, job: str | None = None, *, delay: float = 8.0,
+                dry_run: bool = False, multi: bool = True, log=print) -> None:
+    """Launch every account, arming the instance lock once for the whole run.
+
+    The lock has to exist before the first client starts, so it is taken here and
+    held until the last launch is done. If the first client refuses to start with it
+    held, it is released immediately and the run continues unlocked.
+    """
+    before = client_count()
+    lock = MultiInstance() if (multi and before == 0 and not dry_run) else None
+    if multi and before > 0:
+        log(f"{before} Roblox client(s) already open - close them first if you want two "
+            "windows; the lock can only be armed before the first one starts")
+    if lock is not None:
+        lock.__enter__()
+
+    try:
+        for index, account in enumerate(accounts):
+            label = account.get("label", "?")
+            started_here = client_count()
+            try:
+                log(f"{label}: requesting ticket...")
+                launch_client(account["cookie"], place, job, dry_run=dry_run, multi=False, log=log)
+            except RuntimeError as err:
+                log(f"{label}: {err}")
+                continue
+            if lock is not None and client_count() <= started_here and index == 0:
+                lock.__exit__()
+                lock = None
+                log("first client did not start with the lock armed - released it")
+                try:
+                    launch_client(account["cookie"], place, job, dry_run=dry_run, multi=False, log=log)
+                except RuntimeError as err:
+                    log(f"{label}: {err}")
+                    continue
+            if index < len(accounts) - 1 and delay:
+                time.sleep(delay)
+    finally:
+        if lock is not None:
+            lock.__exit__()
 
 
 def open_protocol(url: str, dry_run: bool = False) -> None:
@@ -446,18 +494,16 @@ def cli(args) -> int:
         if not chosen:
             print("none of those labels exist", file=sys.stderr)
             return 2
-        for index, account in enumerate(chosen):
-            try:
-                launch_client(account["cookie"], args.place, args.job,
-                              dry_run=args.dry_run, multi=args.multi,
-                              log=lambda m: print(f"  {m}"))
-                if not args.dry_run:
-                    print(f"opened {account['label']} ({account.get('username') or 'unknown'})"
-                          f" in place {args.place}{' job ' + args.job if args.job else ' (any server)'}")
-            except RuntimeError as err:
-                print(f"failed {account['label']}: {err}", file=sys.stderr)
-            if index < len(chosen) - 1 and args.delay:
-                time.sleep(args.delay)
+        try:
+            launch_many(chosen, args.place, args.job, delay=args.delay,
+                        dry_run=args.dry_run, multi=args.multi,
+                        log=lambda m: print(f"  {m}"))
+        except RuntimeError as err:
+            print(f"failed: {err}", file=sys.stderr)
+            return 1
+        for account in chosen:
+            print(f"launched {account['label']} ({account.get('username') or 'unknown'})"
+                  f" in place {args.place}{' job ' + args.job if args.job else ' (any server)'}")
         return 0
 
     print("nothing to do; try --list, --add, --verify or --launch", file=sys.stderr)
@@ -685,18 +731,11 @@ class LauncherApp(tk.Tk):
         multi = bool(self.multi.get())
 
         def work() -> None:
-            for index, account in enumerate(chosen):
-                label = account["label"]
-                say = lambda m, l=label: self.after(0, lambda: self.write_log(f"{l}: {m}"))
-                try:
-                    say("requesting ticket...")
-                    launch_client(account["cookie"], place, job, dry_run=dry,
-                                  multi=multi, log=say)
-                    say("launched" if not dry else "dry run ok")
-                except Exception as err:  # noqa: BLE001 - surface anything to the log
-                    say(str(err))
-                if index < len(chosen) - 1 and delay:
-                    time.sleep(delay)
+            try:
+                launch_many(chosen, place, job, delay=delay, dry_run=dry, multi=multi,
+                            log=lambda m: self.after(0, lambda: self.write_log(m)))
+            except Exception as err:  # noqa: BLE001 - surface anything to the log
+                self.after(0, lambda: self.write_log(str(err)))
             self.after(0, lambda: self.status.configure(text="Launch run finished"))
 
         self.status.configure(text="Launching...")

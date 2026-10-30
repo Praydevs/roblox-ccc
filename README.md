@@ -206,11 +206,14 @@ with `PlaceLauncher.ashx` inside it. Nothing is patched, no client files are tou
 - `--job` (a raw id or a copied `?gameInstanceId=` server link) puts every account in the
   same server. Omit it and each client joins any open server in that place.
 - `--dry-run` prints the protocol URL without opening a client.
-- **Two windows at once:** the launcher takes Roblox's `ROBLOX_singletonMutex` before
-  handing over the URL, which is what the C++ multi-instance tools do, so the second client
-  opens as its own window. The GUI has the same toggle; `--no-multi` turns it off. If a
-  launch produces no new `RobloxPlayerBeta.exe`, the launcher retries without the lock and
-  says so in the log instead of claiming success.
+- **Two windows at once:** close every Roblox window first, then launch both accounts from
+  the tool. It creates `ROBLOX_singletonMutex` before the first client starts and keeps it
+  for the whole run, the same trick the C++ multi-instance launchers use. The GUI has the
+  toggle; `--no-multi` turns it off.
+- The lock is only taken from a cold start. If a client is already open the tool leaves the
+  kernel objects alone (touching them while a client runs can close that window) and tells
+  you in the log. If the first client still refuses to start while the lock is held, the
+  lock is released and that launch is retried without it.
 
 ## Routes
 
