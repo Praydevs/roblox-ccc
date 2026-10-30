@@ -1,0 +1,14 @@
+node_modules/
+.env
+.env.local
+
+# runtime state: users, sessions, API keys, webhooks, stored cookies
+data/db.json
+data/db.json.tmp
+
+*.log
+server.log
+
+.DS_Store
+Thumbs.db
+.wrangler/
