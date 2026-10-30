@@ -88,6 +88,8 @@ initApp({
   PORT,
   DISCORD_ID,
   DISCORD_SECRET,
+  ACCOUNT_API_URL: process.env.ACCOUNT_API_URL,
+  ACCOUNT_API_KEY: process.env.ACCOUNT_API_KEY,
   lanUrls,
   serveStatic,
   runtimeName: `node ${process.version}`,

@@ -164,6 +164,8 @@ export function createStore() {
     db = JSON.parse(readFileSync(DB_PATH, 'utf8'));
     for (const u of db.users) {
       u.password_hash ??= null;
+      u.email ??= null;
+      u.remote_id ??= null;
       if (typeof u.api_key === 'string' && u.api_key.startsWith('syn_')) {
         u.api_key = `vexora_${u.api_key.slice(4)}`;
       }
@@ -218,10 +220,15 @@ export function createStore() {
     userByToken: (t) => db.users.find((u) => u.webhook_token === t) ?? null,
     userByApiKey: (key) => (key ? db.users.find((u) => u.api_key === key) ?? null : null),
     userByDiscord: (d) => db.users.find((u) => u.discord_id === String(d)) ?? null,
+    userByRemoteId: (id) => (id ? db.users.find((u) => u.remote_id === String(id)) ?? null : null),
+    userByEmail: (email) => (email
+      ? db.users.find((u) => String(u.email ?? '').toLowerCase() === String(email).toLowerCase()) ?? null
+      : null),
 
     adminWithPassword: () => db.users.some((u) => u.role === 'admin' && Boolean(u.password_hash)),
+    hasOwner: () => db.users.some((u) => u.role === 'admin' && (Boolean(u.password_hash) || Boolean(u.remote_id))),
 
-    createUser({ username, password_hash = null, discord_id = null, avatar = null, role = 'member' }) {
+    createUser({ username, password_hash = null, discord_id = null, avatar = null, role = 'member', email = null, remote_id = null }) {
       const u = {
         id: randomUUID(),
         username,
@@ -232,6 +239,8 @@ export function createStore() {
         ban_reason: null,
         discord_id,
         password_hash,
+        email,
+        remote_id,
         webhook_token: token(18),
         api_key: `vexora_${token(16)}`,
         created_at: now(),
@@ -335,11 +344,22 @@ export function createStore() {
     },
 
     sessions: () => db.sessions,
-    createSession(userId) {
+    createSession(userId, extra = {}) {
       const s = token(32);
-      db.sessions[hashCode(s)] = { user_id: userId, created_at: now() };
+      db.sessions[hashCode(s)] = { user_id: userId, created_at: now(), ...extra };
       touch();
       return s;
+    },
+    sessionRecord(raw) {
+      if (!raw) return null;
+      return db.sessions[hashCode(raw)] ?? null;
+    },
+    updateSession(raw, patch) {
+      const rec = raw ? db.sessions[hashCode(raw)] : null;
+      if (!rec) return null;
+      Object.assign(rec, patch);
+      touch();
+      return rec;
     },
     sessionUser(raw) {
       if (!raw) return null;

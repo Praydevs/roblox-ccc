@@ -17,6 +17,8 @@ let PORT = 5175;
 let DISCORD_ID = '';
 let DISCORD_SECRET = '';
 let DISCORD_ON = false;
+let ACCOUNT_API_URL = 'https://cloud-credential-compass.lovable.app';
+let ACCOUNT_API_KEY = '';
 let CLIENT_LUA = '';
 let CLAIMER_LUA = '';
 let lanUrls = () => [];
@@ -49,6 +51,8 @@ export const initApp = (deps = {}) => {
   if (deps.PORT) PORT = deps.PORT;
   if (deps.DISCORD_ID !== undefined) DISCORD_ID = deps.DISCORD_ID ?? '';
   if (deps.DISCORD_SECRET !== undefined) DISCORD_SECRET = deps.DISCORD_SECRET ?? '';
+  if (deps.ACCOUNT_API_URL) ACCOUNT_API_URL = deps.ACCOUNT_API_URL;
+  if (deps.ACCOUNT_API_KEY !== undefined) ACCOUNT_API_KEY = deps.ACCOUNT_API_KEY ?? '';
   if (deps.CLIENT_LUA) CLIENT_LUA = deps.CLIENT_LUA;
   if (deps.CLAIMER_LUA) CLAIMER_LUA = deps.CLAIMER_LUA;
   if (deps.lanUrls) lanUrls = deps.lanUrls;
@@ -175,7 +179,9 @@ const publicUser = (u) => ({
   ban_reason: u.ban_reason,
   created_at: u.created_at,
   last_seen: u.last_seen,
+  email: u.email ?? null,
   password_set: Boolean(u.password_hash),
+  managed: Boolean(u.remote_id),
 });
 
 const maskWebhook = (url) => {
@@ -416,11 +422,52 @@ const claimJobPayload = (j) => ({
   requester: j.requester ?? null,
 });
 
+// ---------- managed accounts ----------
+// When ACCOUNT_API_KEY is set, accounts live in the external account database and
+// this app never sees a password hash. Without it, local password auth is used.
+const remoteAccounts = () => Boolean(ACCOUNT_API_KEY);
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+
+const accountApi = async (path, body) => {
+  const base = ACCOUNT_API_URL.replace(/\/+$/, '');
+  const res = await fetch(`${base}${path}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-api-key': ACCOUNT_API_KEY },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(15_000),
+  });
+  let data = null;
+  try { data = await res.json(); } catch { data = null; }
+  return { res, data };
+};
+
+const remoteMessage = (data, fallback) =>
+  String(data?.error ?? data?.message ?? fallback).replace(/[<>\r\n]/g, '').slice(0, 160);
+
+const remoteSession = (data) => ({
+  remote_token: data?.session?.token ?? null,
+  remote_expires: data?.session?.expires_at ?? null,
+  remote_checked: Date.now(),
+});
+
 // ---------- api ----------
 const api = {
-  'GET /api/me': (req, res) => {
+  'GET /api/me': async (req, res) => {
     const u = requireUser(req, res);
     if (!u) return;
+
+    // re-check a managed session against the account service at most every 10 min
+    const raw = parseCookies(req.headers.cookie).vexora_session;
+    const record = store.sessionRecord ? store.sessionRecord(raw) : null;
+    if (record?.remote_token && remoteAccounts() && Date.now() - (record.remote_checked ?? 0) > 10 * 60_000) {
+      const check = await accountApi('/api/public/session', { token: record.remote_token }).catch(() => null);
+      if (check && (check.data?.valid === false || check.res?.status === 401)) {
+        store.destroySession(raw);
+        return json(res, 401, { error: 'Your session has ended. Sign in again.' });
+      }
+      if (check?.res?.ok && check.data?.valid) store.updateSession?.(raw, { remote_checked: Date.now() });
+    }
+
     json(res, 200, { user: publicUser(u) });
   },
 
@@ -786,7 +833,12 @@ const api = {
   },
 
   'GET /api/auth/config': (req, res) => {
-    json(res, 200, { discord_oauth: DISCORD_ON, password_auth: true });
+    json(res, 200, {
+      discord_oauth: DISCORD_ON,
+      password_auth: true,
+      managed_accounts: remoteAccounts(),
+      account_service: remoteAccounts() ? ACCOUNT_API_URL : null,
+    });
   },
 
   'GET /api/hits': (req, res, url) => {
@@ -1176,6 +1228,7 @@ const handle = async (req, res) => {
       const body = await readBody(req);
       const username = String(body.username ?? '').trim();
       const password = String(body.password ?? '');
+      const email = String(body.email ?? '').trim().toLowerCase();
       if (!USERNAME_RE.test(username)) {
         return json(res, 400, { error: 'Username must be 3-20 characters: letters, numbers, dot, dash or underscore.' });
       }
@@ -1183,9 +1236,47 @@ const handle = async (req, res) => {
       if (password.length > 200) return json(res, 400, { error: 'Password is too long.' });
 
       let user = store.userByUsername(username);
-      if (user?.password_hash) return json(res, 409, { error: 'That username is already taken.' });
+      if (user?.password_hash || user?.remote_id) return json(res, 409, { error: 'That username is already taken.' });
       if (user?.claimable === false) return json(res, 409, { error: 'That username is already taken.' });
       if (user?.banned) return json(res, 403, { error: 'That account has been banned.' });
+
+      if (remoteAccounts()) {
+        if (!EMAIL_RE.test(email)) return json(res, 400, { error: 'Enter a valid email address.' });
+        if (store.userByEmail?.(email)) return json(res, 409, { error: 'That email is already registered.' });
+
+        let remote;
+        try {
+          remote = await accountApi('/api/public/signup', { username, email, password });
+        } catch {
+          return json(res, 502, { error: 'The account service is unreachable. Try again in a minute.' });
+        }
+        if (!remote.res.ok || !remote.data?.ok) {
+          return json(res, remote.res.status === 409 ? 409 : 400, {
+            error: remoteMessage(remote.data, 'Could not create that account.'),
+          });
+        }
+
+        const account = remote.data.account ?? {};
+        if (user) {
+          user.email = email;
+          user.remote_id = account.id ?? null;
+          user.password_hash = null;
+          user.claimable = false;
+          user.last_seen = Date.now();
+          store.saveUser(user);
+        } else {
+          user = store.createUser({
+            username,
+            email,
+            remote_id: account.id ?? null,
+            role: store.hasOwner?.() ? 'member' : 'admin',
+          });
+        }
+
+        const session = store.createSession(user.id, remoteSession(remote.data));
+        res.writeHead(200, { 'content-type': 'application/json', 'set-cookie': sessionCookie(session, req) });
+        return res.end(JSON.stringify({ user: publicUser(user) }));
+      }
 
       if (user) {
         // Claiming a legacy/demo account sets a password but never carries its role:
@@ -1209,10 +1300,50 @@ const handle = async (req, res) => {
 
     if (pathname === '/auth/login' && method === 'POST') {
       const body = await readBody(req);
-      const username = String(body.username ?? '').trim();
+      const username = String(body.username ?? body.login ?? '').trim();
       const password = String(body.password ?? '');
       const ip = clientIp(req);
       if (tooManyLogins(ip)) return json(res, 429, { error: 'Too many attempts. Try again in a few minutes.' });
+
+      if (remoteAccounts()) {
+        let remote;
+        try {
+          remote = await accountApi('/api/public/login', { login: username, password });
+        } catch {
+          return json(res, 502, { error: 'The account service is unreachable. Try again in a minute.' });
+        }
+
+        if (!remote.res.ok || !remote.data?.ok || remote.data?.valid === false) {
+          noteLoginFail(ip);
+          return json(res, 401, { error: remoteMessage(remote.data, 'Wrong username/email or password.') });
+        }
+
+        const account = remote.data.account ?? {};
+        let user = (account.id && store.userByRemoteId?.(account.id))
+          || (account.username && store.userByUsername(account.username))
+          || (account.email && store.userByEmail?.(account.email))
+          || (username.includes('@') ? store.userByEmail?.(username) : store.userByUsername(username));
+
+        if (!user) {
+          user = store.createUser({
+            username: String(account.username ?? username).replace(/[^A-Za-z0-9_.-]/g, '').slice(0, 20) || 'member',
+            email: account.email ?? null,
+            remote_id: account.id ?? null,
+            role: store.hasOwner?.() ? 'member' : 'admin',
+          });
+        }
+        if (user.banned) return json(res, 403, { error: 'You have been banned from Vexora.', reason: user.ban_reason });
+
+        loginFails.delete(ip);
+        user.email = account.email ?? user.email ?? null;
+        user.remote_id = account.id ?? user.remote_id ?? null;
+        user.last_seen = Date.now();
+        store.saveUser(user);
+
+        const session = store.createSession(user.id, remoteSession(remote.data));
+        res.writeHead(200, { 'content-type': 'application/json', 'set-cookie': sessionCookie(session, req) });
+        return res.end(JSON.stringify({ user: publicUser(user) }));
+      }
 
       const user = username ? store.userByUsername(username) : null;
       const valid = Boolean(user) && (await verifyPassword(password, user.password_hash));
@@ -1231,7 +1362,12 @@ const handle = async (req, res) => {
     }
 
     if (pathname === '/auth/logout' && method === 'POST') {
-      store.destroySession(parseCookies(req.headers.cookie).vexora_session);
+      const raw = parseCookies(req.headers.cookie).vexora_session;
+      const record = store.sessionRecord ? store.sessionRecord(raw) : null;
+      if (record?.remote_token && remoteAccounts()) {
+        await accountApi('/api/public/session', { token: record.remote_token, action: 'logout' }).catch(() => null);
+      }
+      store.destroySession(raw);
       res.writeHead(200, { 'content-type': 'application/json', 'set-cookie': 'vexora_session=; Path=/; Max-Age=0' });
       return res.end(JSON.stringify({ ok: true }));
     }

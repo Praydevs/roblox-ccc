@@ -30,6 +30,8 @@ export class Vexora {
       PORT: 443,
       DISCORD_ID: env.DISCORD_CLIENT_ID ?? '',
       DISCORD_SECRET: env.DISCORD_CLIENT_SECRET ?? '',
+      ACCOUNT_API_URL: env.ACCOUNT_API_URL ?? undefined,
+      ACCOUNT_API_KEY: env.ACCOUNT_API_KEY ?? '',
       lanUrls: () => [],
       runtimeName: 'workerd',
       startedAt: Date.now(),

@@ -50,7 +50,7 @@ export const api = {
   adminSystem: () => request('/api/admin/system'),
 
   authConfig: () => request('/api/auth/config'),
-  register: (username, password) => request('/auth/register', { method: 'POST', body: JSON.stringify({ username, password }) }),
+  register: (username, password, email) => request('/auth/register', { method: 'POST', body: JSON.stringify({ username, password, email }) }),
   login: (username, password) => request('/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) }),
   logout: () => request('/auth/logout', { method: 'POST' }),
 };

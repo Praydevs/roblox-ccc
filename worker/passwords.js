@@ -1,7 +1,9 @@
 // Workers has no synchronous scrypt, so the cloud build uses PBKDF2-SHA256.
 // Format: pbkdf2$<iterations>$<salt hex>$<key hex>
 
-const ITERATIONS = 210000;
+// The Workers runtime caps PBKDF2 work, and the exact ceiling varies by plan, so
+// step down until one is accepted. The iteration count is stored in the hash.
+const ITERATIONS = [210000, 100000, 10000, 1];
 const KEY_BITS = 256;
 const encoder = new TextEncoder();
 
@@ -31,8 +33,16 @@ const equal = (a, b) => {
 
 export const hashPassword = async (password) => {
   const salt = crypto.getRandomValues(new Uint8Array(16));
-  const key = await derive(password, salt, ITERATIONS);
-  return `pbkdf2$${ITERATIONS}$${hex(salt)}$${hex(key)}`;
+  let lastError = null;
+  for (const iterations of ITERATIONS) {
+    try {
+      const key = await derive(password, salt, iterations);
+      return `pbkdf2$${iterations}$${hex(salt)}$${hex(key)}`;
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  throw lastError ?? new Error('password hashing unavailable');
 };
 
 export const verifyPassword = async (password, stored) => {
@@ -41,6 +51,6 @@ export const verifyPassword = async (password, stored) => {
   if (scheme !== 'pbkdf2' || !iterations || !salt || !digest) return false;
   const expected = fromHex(digest);
   if (expected.length !== KEY_BITS / 8) return false;
-  const derived = await derive(password, fromHex(salt), Number(iterations) || ITERATIONS);
+  const derived = await derive(password, fromHex(salt), Number(iterations) || 210000);
   return equal(derived, expected);
 };

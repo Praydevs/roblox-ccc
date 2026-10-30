@@ -137,8 +137,12 @@ const loginScreen = ({ message = '', discord = false } = {}) => `
         <div class="auth-error" id="auth-error" hidden></div>
         <form class="auth-form" id="auth-form">
           <div class="field">
-            <label for="auth-username">Username</label>
-            <input class="input" id="auth-username" name="username" placeholder="yourname" autocomplete="username" required minlength="3" maxlength="20" spellcheck="false" />
+            <label for="auth-username">Username or email</label>
+            <input class="input" id="auth-username" name="username" placeholder="yourname or you@mail.com" autocomplete="username" required minlength="3" maxlength="60" spellcheck="false" />
+          </div>
+          <div class="field" id="auth-email-field" hidden>
+            <label for="auth-email">Email</label>
+            <input class="input" id="auth-email" name="email" type="email" placeholder="you@mail.com" autocomplete="email" />
           </div>
           <div class="field">
             <div class="field-row">
@@ -161,11 +165,12 @@ const wireLogin = () => {
   if (!form) return;
 
   const title = root.querySelector('#auth-title');
-  const sub = root.querySelector('#auth-sub');
-  const hint = root.querySelector('#auth-hint');
-  const errorBox = root.querySelector('#auth-error');
-  const submit = root.querySelector('#auth-submit');
-  const password = root.querySelector('#auth-password');
+  const sub = root.querySelector('#auth-sub');    const hint = root.querySelector('#auth-hint');
+    const errorBox = root.querySelector('#auth-error');
+    const submit = root.querySelector('#auth-submit');
+    const password = root.querySelector('#auth-password');
+    const emailField = root.querySelector('#auth-email-field');
+    const emailInput = root.querySelector('#auth-email');
   const toggle = root.querySelector('#auth-toggle');
   const tabs = [...root.querySelectorAll('[data-auth-mode]')];
   let mode = 'login';
@@ -182,9 +187,11 @@ const wireLogin = () => {
       ? 'Pick a username and a password. No Discord needed.'
       : 'Use your Vexora username and password to get back in.';
     hint.textContent = register
-      ? 'At least 8 characters. Usernames are 3–20 characters.'
+      ? 'Username, email and a password of 8+ characters.'
       : 'New here? Create an account — it takes a second.';
     submit.textContent = register ? 'Create account' : 'Sign in';
+    emailField.hidden = !register;
+    emailInput.required = register;
     password.setAttribute('autocomplete', register ? 'new-password' : 'current-password');
     errorBox.hidden = true;
     errorBox.textContent = '';
@@ -206,6 +213,7 @@ const wireLogin = () => {
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     const username = form.elements.username.value.trim();
+    const email = form.elements.email?.value.trim() ?? '';
     const secret = form.elements.password.value;
     const register = mode === 'register';
     errorBox.hidden = true;
@@ -216,10 +224,16 @@ const wireLogin = () => {
       return;
     }
 
+    if (register && !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) {
+      errorBox.hidden = false;
+      errorBox.textContent = 'Enter a valid email address.';
+      return;
+    }
+
     submit.disabled = true;
     submit.textContent = register ? 'Creating account…' : 'Signing in…';
     try {
-      if (register) await api.register(username, secret);
+      if (register) await api.register(username, secret, email);
       else await api.login(username, secret);
       toast(register ? 'Account created. Welcome to Vexora.' : 'Signed in.', 'success');
       await boot();

