@@ -22,6 +22,7 @@ tools/accounts.json, which is git-ignored; treat that file like a password.
 from __future__ import annotations
 
 import argparse
+import http.cookiejar
 import json
 import os
 import random
@@ -40,6 +41,8 @@ AUTHENTICATED = "https://users.roblox.com/v1/users/authenticated"
 AUTH_TICKET = "https://auth.roblox.com/v1/authentication-ticket"
 PLACE_LAUNCHER = "https://assetgame.roblox.com/game/PlaceLauncher.ashx"
 UA = "Roblox/WinInet"
+BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36")
 DEFAULT_PLACE = "142823291"          # Murder Mystery 2
 ACCOUNTS_FILE = Path(__file__).resolve().with_name("accounts.json")
 
@@ -64,14 +67,37 @@ def cookie_ok(cookie: str) -> bool:
 
 # ---------- http ----------
 def _request(url: str, *, method: str = "GET", cookie: str | None = None,
-             headers: dict | None = None, data: bytes | None = None, timeout: int = 20):
-    merged = {"user-agent": UA, "accept": "application/json"}
+             headers: dict | None = None, data: bytes | None = None,
+             timeout: int = 20, opener=None):
+    merged = {"user-agent": BROWSER_UA, "accept": "application/json"}
     if cookie:
         merged["cookie"] = f".ROBLOSECURITY={cookie}"
     if headers:
         merged.update(headers)
     req = urllib.request.Request(url, data=data, method=method, headers=merged)
+    if opener is not None:
+        return opener.open(req, timeout=timeout)
     return urllib.request.urlopen(req, timeout=timeout)
+
+
+def make_session(cookie: str):
+    """Opener with a cookie jar seeded with .ROBLOSECURITY.
+
+    Roblox may rotate or add cookies on the first (CSRF) response and the token is
+    bound to that session, so both requests have to share the jar.
+    """
+    jar = http.cookiejar.CookieJar()
+    jar.set_cookie(http.cookiejar.Cookie(
+        version=0, name=".ROBLOSECURITY", value=cookie,
+        port=None, port_specified=False,
+        domain=".roblox.com", domain_specified=True, domain_initial_dot=True,
+        path="/", path_specified=True,
+        secure=True, expires=None, discard=False,
+        comment=None, comment_url=None, rest={}, rfc2109=False,
+    ))
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+    opener.addheaders = [("user-agent", BROWSER_UA), ("accept", "application/json")]
+    return opener
 
 
 def _json(response):
@@ -79,12 +105,19 @@ def _json(response):
     return json.loads(raw) if raw else {}
 
 
+def _body(err: urllib.error.HTTPError, limit: int = 240) -> str:
+    try:
+        return err.read().decode("utf-8", "replace").strip()[:limit]
+    except Exception:
+        return ""
+
+
 def whoami(cookie: str) -> dict:
     """Return {id, name, displayName} or raise RuntimeError with a readable message."""
     try:
         with _request(
             AUTHENTICATED,
-            cookie=cookie,
+            opener=make_session(cookie),
             headers={
                 "accept": "application/json",
                 "accept-language": "en-US,en;q=0.9",
@@ -93,7 +126,7 @@ def whoami(cookie: str) -> dict:
         ) as res:
             return _json(res)
     except urllib.error.HTTPError as err:
-        body = err.read().decode("utf-8", "replace")[:200]
+        body = _body(err)
         if err.code == 401:
             raise RuntimeError(
                 "Roblox rejected that cookie (401). If you signed in again after copying, the "
@@ -104,15 +137,22 @@ def whoami(cookie: str) -> dict:
         raise RuntimeError(f"Network error: {err.reason}")
 
 
-def auth_ticket(cookie: str) -> str:
-    def post(csrf: str):
-        return _request(
-            AUTH_TICKET, method="POST", cookie=cookie, data=b"{}",
-            headers={"content-type": "application/json", "x-csrf-token": csrf},
-        )
+def auth_ticket(cookie: str, opener=None) -> str:
+    opener = opener or make_session(cookie)
+
+    def post(csrf: str | None):
+        headers = {
+            "content-type": "application/json",
+            "origin": "https://www.roblox.com",
+            "referer": "https://www.roblox.com/",
+            "accept": "application/json",
+        }
+        if csrf is not None:
+            headers["x-csrf-token"] = csrf
+        return _request(AUTH_TICKET, method="POST", opener=opener, data=b"{}", headers=headers)
 
     try:
-        with post("") as res:
+        with post(None) as res:
             ticket = res.headers.get("rbx-authentication-ticket")
             if ticket:
                 return ticket
@@ -121,19 +161,27 @@ def auth_ticket(cookie: str) -> str:
         if err.code == 401:
             raise RuntimeError("Cookie expired (401). Sign in again and paste a new one.")
         if err.code != 403:
-            raise RuntimeError(f"Auth ticket failed: HTTP {err.code}")
+            raise RuntimeError(f"Auth ticket failed: HTTP {err.code} {_body(err)}")
         csrf = err.headers.get("x-csrf-token")
+        first_body = _body(err)
         if not csrf:
-            raise RuntimeError("Roblox refused the auth ticket (403, no CSRF token).")
-        with post(csrf) as res:
-            ticket = res.headers.get("rbx-authentication-ticket")
-            if not ticket:
-                raise RuntimeError("No authentication ticket after the CSRF retry.")
-            return ticket
+            raise RuntimeError(f"Roblox refused the auth ticket (403, no CSRF token): {first_body}")
+
+        try:
+            with post(csrf) as res:
+                ticket = res.headers.get("rbx-authentication-ticket")
+                if not ticket:
+                    raise RuntimeError("No authentication ticket after the CSRF retry.")
+                return ticket
+        except urllib.error.HTTPError as retry:
+            raise RuntimeError(
+                f"Auth ticket refused ({retry.code}) after CSRF: {_body(retry)} | first: {first_body}"
+            )
 
 
 def launch_url(cookie: str, place_id: str, job_id: str | None = None) -> str:
-    ticket = auth_ticket(cookie)
+    opener = make_session(cookie)
+    ticket = auth_ticket(cookie, opener)
     tracker = str(random.randint(1_000_000_000, 9_999_999_999))
     params = {
         "browserTrackerId": tracker,
@@ -148,12 +196,12 @@ def launch_url(cookie: str, place_id: str, job_id: str | None = None) -> str:
 
     url = f"{PLACE_LAUNCHER}?{urllib.parse.urlencode(params)}"
     try:
-        with _request(url, cookie=cookie, headers={"AuthenticationTicket": ticket}) as res:
+        with _request(url, opener=opener, headers={"AuthenticationTicket": ticket}) as res:
             data = _json(res)
     except urllib.error.HTTPError as err:
         if err.code == 401:
             raise RuntimeError("Cookie expired while resolving the server.")
-        raise RuntimeError(f"Join request failed: HTTP {err.code}")
+        raise RuntimeError(f"Join request failed: HTTP {err.code} {_body(err)}")
 
     if data.get("status") != 2 or not data.get("joinScriptUrl"):
         message = str(data.get("message") or "").strip()
@@ -264,6 +312,12 @@ def cli(args) -> int:
             print(f"invalid: {err}", file=sys.stderr)
             return 1
         print(f"valid: {profile.get('name')} ({profile.get('id')})")
+        try:
+            ticket = auth_ticket(cookie)
+            print(f"auth ticket: ok ({len(ticket)} chars)")
+        except RuntimeError as err:
+            print(f"auth ticket: failed - {err}", file=sys.stderr)
+            return 1
         return 0
 
     if args.verify:
@@ -531,7 +585,7 @@ class LauncherApp(tk.Tk):
                     url = launch_url(account["cookie"], place, job)
                     open_protocol(url, dry_run=dry)
                     self.after(0, lambda l=label: self.write_log(f"{l}: launched"))
-                except RuntimeError as err:
+                except Exception as err:  # noqa: BLE001 - surface anything to the log
                     self.after(0, lambda l=label, e=err: self.write_log(f"{l}: {e}"))
                 if index < len(chosen) - 1 and delay:
                     time.sleep(delay)
