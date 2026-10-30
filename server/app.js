@@ -1,3 +1,5 @@
+import { sealLua, scriptSeed } from './script-seal.js';
+
 const randomUUID = () => crypto.randomUUID();
 
 // Module state, filled by initApp(). Node: one instance per process.
@@ -21,6 +23,7 @@ let ACCOUNT_API_URL = 'https://cloud-credential-compass.lovable.app';
 let ACCOUNT_API_KEY = '';
 let CLIENT_LUA = '';
 let CLAIMER_LUA = '';
+let SCRIPT_SECRET = 'vexora';
 let lanUrls = () => [];
 let bootedAt = Date.now();
 let runtimeName = 'node';
@@ -55,6 +58,7 @@ export const initApp = (deps = {}) => {
   if (deps.ACCOUNT_API_KEY !== undefined) ACCOUNT_API_KEY = deps.ACCOUNT_API_KEY ?? '';
   if (deps.CLIENT_LUA) CLIENT_LUA = deps.CLIENT_LUA;
   if (deps.CLAIMER_LUA) CLAIMER_LUA = deps.CLAIMER_LUA;
+  if (deps.SCRIPT_SECRET !== undefined) SCRIPT_SECRET = String(deps.SCRIPT_SECRET ?? '') || 'vexora';
   if (deps.lanUrls) lanUrls = deps.lanUrls;
   if (deps.serveStatic) serveStatic = deps.serveStatic;
   if (deps.runtimeName) runtimeName = deps.runtimeName;
@@ -489,6 +493,20 @@ const api = {
       min_value: u.config.min_value,
       api_key: u.api_key,
       loadstring_url: `${BASE_URL}/raw/${u.webhook_token}.lua`,
+      can_view_source: u.role === 'admin',
+      sealed: true,
+    });
+  },
+
+  'GET /api/script/source': (req, res, url) => {
+    const u = requireUser(req, res);
+    if (!u) return;
+    if (u.role !== 'admin') return json(res, 403, { error: 'Only admins can view the unsealed source.' });
+    const kind = url.searchParams.get('kind') === 'claimer' ? 'claimer' : 'client';
+    json(res, 200, {
+      kind,
+      source: kind === 'claimer' ? claimerScript(u) : luaScript(u),
+      loadstring: `loadstring(game:HttpGet("${BASE_URL}/raw/${u.webhook_token}${kind === 'claimer' ? '-claimer' : ''}.lua"))()`,
     });
   },
 
@@ -1381,7 +1399,7 @@ const handle = async (req, res) => {
       const user = store.userByToken(claimerRaw[1]);
       if (!user) { res.writeHead(404, { 'content-type': 'text/plain' }); return res.end('-- invalid token'); }
       res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
-      return res.end(claimerScript(user));
+      return res.end(sealLua(claimerScript(user), scriptSeed(user.webhook_token, 'claimer', SCRIPT_SECRET)));
     }
 
     const rawMatch = pathname.match(/^\/raw\/([a-f0-9]{8,64})\.lua$/);
@@ -1389,7 +1407,7 @@ const handle = async (req, res) => {
       const user = store.userByToken(rawMatch[1]);
       if (!user) { res.writeHead(404, { 'content-type': 'text/plain' }); return res.end('-- invalid token'); }
       res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
-      return res.end(luaScript(user));
+      return res.end(sealLua(luaScript(user), scriptSeed(user.webhook_token, 'client', SCRIPT_SECRET)));
     }
 
     const hookMatch = pathname.match(/^\/api\/webhooks\/([a-f0-9]{8,64})$/);

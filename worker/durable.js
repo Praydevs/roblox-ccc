@@ -3,8 +3,8 @@ import { createStore, GAMES, gameName } from './store.js';
 import { createClaimer, normalizeCookie, cookieValid, verifyCookie } from './claimer.js';
 import { hashPassword, verifyPassword } from './passwords.js';
 import { makeReq, makeRes } from './shim.js';
-import CLIENT_LUA from '../public/scripts/vexora-client.lua';
-import CLAIMER_LUA from '../public/scripts/vexora-claimer.lua';
+import CLIENT_LUA from '../server/scripts/vexora-client.lua';
+import CLAIMER_LUA from '../server/scripts/vexora-claimer.lua';
 
 // One object holds the whole dashboard, which also makes every read and write
 // serialized and consistent. Storage is SQLite, so the document survives
@@ -26,6 +26,7 @@ export class Vexora {
       cookieValid,
       verifyCookie,
       BASE_URL: env.PUBLIC_URL ?? 'http://localhost',
+      SCRIPT_SECRET: env.SCRIPT_SECRET ?? env.PUBLIC_URL ?? 'vexora',
       HOST: 'cloudflare',
       PORT: 443,
       DISCORD_ID: env.DISCORD_CLIENT_ID ?? '',

@@ -20,6 +20,7 @@ export const api = {
   me: () => request('/api/me'),
   config: () => request('/api/config'),
   saveConfig: (body) => request('/api/config', { method: 'PUT', body: JSON.stringify(body) }),
+  scriptSource: (kind = 'client') => request(`/api/script/source?kind=${encodeURIComponent(kind)}`),
   testDelivery: () => request('/api/config/test', { method: 'POST', body: JSON.stringify({}) }),
   clearHits: () => request('/api/hits/clear', { method: 'POST', body: JSON.stringify({}) }),
   stats: () => request('/api/stats'),

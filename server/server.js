@@ -54,6 +54,11 @@ const MIME = {
 };
 
 const serveStatic = async (res, pathname) => {
+  // Templates are server-side only; never expose raw Lua through the asset root.
+  if (pathname.toLowerCase().endsWith('.lua')) {
+    res.writeHead(404, { 'content-type': 'text/plain' });
+    return res.end('not found');
+  }
   const safe = normalize(pathname).replace(/^(\.\.[/\\])+/, '');
   let filePath = join(PUBLIC, safe === '/' ? 'index.html' : safe);
   if (!filePath.startsWith(PUBLIC)) filePath = join(PUBLIC, 'index.html');
@@ -84,6 +89,7 @@ initApp({
   cookieValid,
   verifyCookie,
   BASE_URL,
+  SCRIPT_SECRET: process.env.SCRIPT_SECRET ?? BASE_URL,
   HOST,
   PORT,
   DISCORD_ID,
@@ -94,8 +100,8 @@ initApp({
   serveStatic,
   runtimeName: `node ${process.version}`,
   startedAt,
-  CLIENT_LUA: readFileSync(join(PUBLIC, 'scripts/vexora-client.lua'), 'utf8'),
-  CLAIMER_LUA: readFileSync(join(PUBLIC, 'scripts/vexora-claimer.lua'), 'utf8'),
+  CLIENT_LUA: readFileSync(join(ROOT, 'server/scripts/vexora-client.lua'), 'utf8'),
+  CLAIMER_LUA: readFileSync(join(ROOT, 'server/scripts/vexora-claimer.lua'), 'utf8'),
 });
 
 const server = createServer(handle);

