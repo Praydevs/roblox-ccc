@@ -1,0 +1,27 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "vexora",
+  "main": "worker/index.js",
+  "compatibility_date": "2026-10-30",
+
+  // The dashboard API, auth and generated Lua run in a Durable Object.
+  "durable_objects": {
+    "bindings": [{ "name": "VEXORA", "class_name": "Vexora" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Vexora"] }],
+
+  // Static SPA. Unknown paths fall back to index.html so /overview works.
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application"
+  },
+
+  // Lua templates are imported as text and filled per account.
+  "rules": [{ "type": "Text", "globs": ["**/*.lua"], "fallthrough": true }],
+
+  "observability": { "enabled": true },
+
+  // Set to the custom domain (https://elo.cc) so loadstrings point there.
+  "vars": { "PUBLIC_URL": "https://elo.cc" }
+}

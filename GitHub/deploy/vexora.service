@@ -1,0 +1,23 @@
+[Unit]
+Description=Vexora dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/vexora
+Environment=NODE_ENV=production
+Environment=HOST=127.0.0.1
+Environment=PORT=5175
+Environment=PUBLIC_URL=https://elo.cc
+ExecStart=/usr/bin/env node server/server.js
+Restart=always
+RestartSec=3
+# state lives in data/db.json; the service user must be able to write it
+User=vexora
+Group=vexora
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
