@@ -194,6 +194,7 @@ the same server so two accounts can trade with each other. Python 3 with tkinter
 ```bash
 python tools/roblox_multi.py                  # GUI: add cookies, tick accounts, launch
 python tools/roblox_multi.py --cli --list
+python tools/roblox_multi.py --cli --check --cookie "_|..."      # test one cookie, don't save
 python tools/roblox_multi.py --cli --add main --cookie "_|..."
 python tools/roblox_multi.py --cli --launch --accounts main,alt --job <jobId> --delay 8
 ```

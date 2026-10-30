@@ -46,10 +46,13 @@ ACCOUNTS_FILE = Path(__file__).resolve().with_name("accounts.json")
 
 # ---------- cookies ----------
 def normalize_cookie(raw: str) -> str:
-    value = (raw or "").strip()
+    value = "".join((raw or "").split())          # pasted values sometimes wrap
+    value = value.split(";", 1)[0]                 # full Cookie header pasted
+    value = value.strip('"').strip("'")
+    if "%" in value:                               # DevTools sometimes copies encoded
+        value = urllib.parse.unquote(value)
     if value.lower().startswith(".roblosecurity="):
-        value = value.split("=", 1)[1].strip()
-    value = value.strip('"')
+        value = value.split("=", 1)[1]
     if value.startswith("WARNING"):
         value = "_|" + value
     return value
@@ -79,12 +82,24 @@ def _json(response):
 def whoami(cookie: str) -> dict:
     """Return {id, name, displayName} or raise RuntimeError with a readable message."""
     try:
-        with _request(AUTHENTICATED, headers={"accept": "application/json"}) as res:
+        with _request(
+            AUTHENTICATED,
+            cookie=cookie,
+            headers={
+                "accept": "application/json",
+                "accept-language": "en-US,en;q=0.9",
+                "referer": "https://www.roblox.com/",
+            },
+        ) as res:
             return _json(res)
     except urllib.error.HTTPError as err:
+        body = err.read().decode("utf-8", "replace")[:200]
         if err.code == 401:
-            raise RuntimeError("Roblox rejected that cookie (401). Sign in again and copy a fresh one.")
-        raise RuntimeError(f"Roblox returned HTTP {err.code} while checking the cookie.")
+            raise RuntimeError(
+                "Roblox rejected that cookie (401). If you signed in again after copying, the "
+                "cookie rotated - copy the current .ROBLOSECURITY from the open session."
+            )
+        raise RuntimeError(f"Roblox returned HTTP {err.code} while checking the cookie: {body}")
     except urllib.error.URLError as err:
         raise RuntimeError(f"Network error: {err.reason}")
 
@@ -235,6 +250,20 @@ def cli(args) -> int:
         accounts = [a for a in load_accounts() if a.get("label") != args.remove]
         save_accounts(accounts)
         print(f"removed {args.remove}")
+        return 0
+
+    if args.check:
+        cookie = normalize_cookie(args.cookie or "")
+        print(f"length={len(cookie)} prefix={cookie[:12]!r} suffix={cookie[-6:]!r}")
+        if not cookie_ok(cookie):
+            print("does not look like a .ROBLOSECURITY value", file=sys.stderr)
+            return 2
+        try:
+            profile = whoami(cookie)
+        except RuntimeError as err:
+            print(f"invalid: {err}", file=sys.stderr)
+            return 1
+        print(f"valid: {profile.get('name')} ({profile.get('id')})")
         return 0
 
     if args.verify:
@@ -520,6 +549,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cookie")
     parser.add_argument("--remove", metavar="LABEL")
     parser.add_argument("--verify", action="store_true")
+    parser.add_argument("--check", action="store_true", help="test one cookie without saving it")
     parser.add_argument("--launch", action="store_true")
     parser.add_argument("--accounts", help="comma separated labels (default: all)")
     parser.add_argument("--place", default=DEFAULT_PLACE)
