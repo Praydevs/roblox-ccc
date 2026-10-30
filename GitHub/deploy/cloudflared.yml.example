@@ -1,0 +1,21 @@
+# Cloudflare Tunnel config for Vexora on elow.cc
+# 1. cloudflared tunnel login
+# 2. cloudflared tunnel create vexora        -> prints the tunnel UUID + credentials path
+# 3. cloudflared tunnel route dns vexora elow.cc
+# 4. copy this file to /etc/cloudflared/config.yml and fill in the two values below
+# 5. cloudflared service install && systemctl enable --now cloudflared
+
+tunnel: <TUNNEL-UUID>
+credentials-file: /root/.cloudflared/<TUNNEL-UUID>.json
+
+ingress:
+  - hostname: elow.cc
+    service: http://127.0.0.1:5175
+    originRequest:
+      connectTimeout: 10s
+      noTLSVerify: false
+      # SSE (/api/stream) needs long-lived responses, so no buffering timeouts.
+      disableChunkedEncoding: false
+  - hostname: www.elow.cc
+    service: http://127.0.0.1:5175
+  - service: http_status:404
