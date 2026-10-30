@@ -12,3 +12,7 @@ server.log
 .DS_Store
 Thumbs.db
 .wrangler/
+
+# launcher cookies
+tools/accounts.json
+__pycache__/

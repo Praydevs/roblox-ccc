@@ -186,6 +186,27 @@ npx wrangler secret put ACCOUNT_API_KEY
 If the key is missing, the app falls back to local password auth (scrypt on Node,
 PBKDF2 on Workers).
 
+## Multi-client launcher
+
+`tools/roblox_multi.py` opens several Roblox clients, one per saved account, optionally into
+the same server so two accounts can trade with each other. Python 3 with tkinter, no packages.
+
+```bash
+python tools/roblox_multi.py                  # GUI: add cookies, tick accounts, launch
+python tools/roblox_multi.py --cli --list
+python tools/roblox_multi.py --cli --add main --cookie "_|..."
+python tools/roblox_multi.py --cli --launch --accounts main,alt --job <jobId> --delay 8
+```
+
+It uses the same flow as the server: cookie → authentication ticket →
+`PlaceLauncher.ashx` → `roblox-player:` URL. Nothing is patched.
+
+- Cookies are stored in `tools/accounts.json` (git-ignored, mode 600).
+- `--job` puts every account in the same `game.JobId`; omit it to join the place normally.
+- `--dry-run` resolves everything and prints the URL without opening a client.
+- Windows allows one Roblox client per user session; for the second client use another
+  Windows user or a VM rather than patching the binary.
+
 ## Routes
 
 | Path | What it does |
