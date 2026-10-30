@@ -190,20 +190,25 @@ PBKDF2 on Workers).
 
 Receivers configured on **My script** are injected into the generated client. When one of
 those usernames is in the server, or joins it, the client requests a trade, offers every
-real item from the inventory and confirms its side. Each stage is recorded and shown under
-**Auto joiner → Receiver trades** (`engine`, `receiver_joined`, `request`, `window`,
-`offer`, `confirm`, `waiting`, `done`, `no_window`).
+real item and confirms its side. Items are offered by clicking the cards in the trade
+window, since that panel is the reliable list of what the account can put up; guessed item
+remotes are only a fallback. The inventory is read from collection folders and the inventory
+panel, and the panel is opened once when it lists nothing. Each stage is recorded and shown
+under **Auto joiner → Receiver trades** (`engine`, `receiver_joined`, `request`, `window`,
+`offer`, `confirm`, `waiting`, `done`, `no_window`, `probe`).
 
 ```json
 { "event": "trade", "stage": "offer", "receiver": "ReceiverOne",
   "items": ["Chroma Seer"], "game": "mm2", "place_id": 142823291,
-  "server_id": "…", "detail": "1 item(s) via 2 remote(s)" }
+  "server_id": "…", "detail": "1 item(s) clicked in the trade window" }
 ```
 
 Trade events are stored on the user (`trades`, last 60) and never create a hit. The client
 discovers trade, item and confirm remotes by name in `ReplicatedStorage`, so a game without
-those remotes reports `no_window` instead of pretending it traded. The receiver has to
-accept; running the same client on that account auto-confirms its side.
+those remotes reports `no_window` instead of pretending it traded. A `probe` stage dumps the
+folders, GUIs and remotes the client can see; an unreadable inventory never triggers the
+no-item kick. The receiver has to accept; running the same client on that account
+auto-confirms its side.
 
 ## Multi-client launcher
 

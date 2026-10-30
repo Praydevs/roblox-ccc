@@ -122,7 +122,7 @@ export async function claimer(root) {
 
       <div class="card">
         <div class="card-head">
-          <div><h2>Receiver trades</h2><p>What the client does when a receiver joins: request, offer, confirm.</p></div>
+          <div><h2>Receiver trades</h2><p>What the client does when a receiver joins: request, offer, confirm. A probe row means it could not read the inventory or the trade window.</p></div>
           <div class="right"><span class="badge game" id="trade-count">0</span></div>
         </div>
         <div class="card-body" style="padding:0">
@@ -301,6 +301,7 @@ export async function claimer(root) {
     const STAGE = {
       engine: 'game', receiver_joined: 'pending', request: 'pending', window: 'partial',
       offer: 'partial', confirm: 'partial', waiting: 'pending', done: 'claimed', no_window: 'missed',
+      probe: 'missed', inventory_unreadable: 'missed',
     };
     const trades = data.trades ?? [];
     $('#trade-count').textContent = `${trades.length}`;
