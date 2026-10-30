@@ -365,6 +365,7 @@ export function createClaimer({
       autoexec_path: cfg.autoexec_path ?? null,
       detected_paths: detectedAutoexecDirs(),
       min_value: Number(cfg.min_value) || 0,
+      trades: (user.trades ?? []).slice(0, 20),
       accounts: accountsOf(user).map((a) => ({
         id: a.id,
         username: a.username,

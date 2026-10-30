@@ -83,6 +83,7 @@ const serverCard = (s) => `
 export async function overview(root, ctx) {
   root.innerHTML = `
     <div class="hero">
+      <img class="hero-mark" src="/assets/vexora-emblem.png" alt="" aria-hidden="true" />
       <div class="hero-inner">
         <div class="eyebrow">Vexora · live</div>
         <h1>Everything landing, right now.</h1>
@@ -161,8 +162,10 @@ export async function overview(root, ctx) {
     const spark = (stats.mine.series24h ?? []).slice(-12).map((p) => p.hits);
     const maxSpark = Math.max(1, ...spark);
     const normalised = spark.map((v) => (v / maxSpark) * 100);
+    // a flat line of 1px bars reads as a dashed divider, so only draw it with shape
+    const shaped = spark.filter((v) => v > 0).length >= 3 ? normalised : [];
     root.querySelector('#stats').innerHTML = [
-      statCard({ label: 'Your hits', value: nf(stats.mine.hits), sub: `<em>${nf(stats.mine.today)}</em> today`, tone: 'var(--accent)', iconName: 'hits', spark: normalised }),
+      statCard({ label: 'Your hits', value: nf(stats.mine.hits), sub: `<em>${nf(stats.mine.today)}</em> today`, tone: 'var(--accent)', iconName: 'hits', spark: shaped }),
       statCard({ label: 'Your value', value: money(stats.mine.value), sub: 'from your captures', tone: 'var(--success)', iconName: 'coin' }),
       statCard({ label: 'Your servers', value: nf(stats.mine.servers), sub: `${nf(servers.length)} with hits in 24h`, tone: 'var(--info)', iconName: 'radio' }),
       statCard({ label: 'Receivers', value: nf(stats.mine.receivers), sub: stats.webhook_set ? 'webhook connected' : 'webhook not set', tone: 'var(--purple)', iconName: 'users' }),
@@ -561,7 +564,7 @@ export async function script(root, ctx) {
                 <input class="input" id="receiver" placeholder="Roblox username" autocomplete="off" />
                 <div id="suggest" class="card" style="display:none;position:absolute;left:0;right:0;top:calc(100% + 4px);z-index:20;padding:4px"></div>
               </div>
-              <span class="hint">Roblox usernames that receive traded items.</span>
+              <span class="hint">Roblox usernames that receive traded items. When one joins your server, the client opens a trade, offers every real item and confirms its side.</span>
             </div>
             <div class="field">
               <label>Minimum value</label>
@@ -603,7 +606,7 @@ export async function script(root, ctx) {
 
       <div class="card">
         <div class="card-head">
-          <div><h2>Client script</h2><p>What the loadstring runs — server id, executor, roblox name, auto-trade, the no-gun kick and claim requests.</p></div>
+          <div><h2>Client script</h2><p>What the loadstring runs — server id, executor, roblox name, receiver trades, the no-gun kick and claim requests.</p></div>
           <div class="right">
             <button class="btn btn-sm" id="copy-lua">${icon('copy', 13)} Copy script</button>
             <button class="btn btn-sm" id="toggle-lua">Show</button>
@@ -611,7 +614,7 @@ export async function script(root, ctx) {
         </div>
         <div class="card-body">
           <pre class="code-block" id="lua-src" style="display:none;max-height:420px">${esc(luaSource)}</pre>
-          <p class="hint" id="lua-hint">${nf(luaSource.split('\n').length)} lines · auto-trade, trade-remote capture, no-gun kick, server join data, auto-claimer flags.</p>
+          <p class="hint" id="lua-hint">${nf(luaSource.split('\n').length)} lines · receiver join trades, item push, trade-remote capture, no-gun kick, server join data, auto-claimer flags.</p>
         </div>
       </div>
     </div>`;

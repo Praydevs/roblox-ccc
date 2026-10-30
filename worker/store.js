@@ -49,6 +49,7 @@ const normalizeUser = (u) => {
   u.claimer.autoexec_path ??= null;
   u.claimer.min_value ??= 0;
   u.claimer.api_base ??= null;
+  u.trades ??= [];
   return u;
 };
 
