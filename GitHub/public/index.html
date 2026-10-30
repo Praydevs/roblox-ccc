@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#08080a" />
+    <meta name="description" content="Vexora — live capture dashboard for hits, servers and receivers." />
+    <title>Vexora — Dashboard</title>
+    <link rel="icon" href="/assets/favicon-32.png" sizes="32x32" type="image/png" />
+    <link rel="icon" href="/assets/favicon-64.png" sizes="64x64" type="image/png" />
+    <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png" />
+    <meta property="og:title" content="Vexora" />
+    <meta property="og:description" content="Every hit, the second it lands." />
+    <meta property="og:image" content="/assets/share.png" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/css/styles.css" />
+    <link rel="stylesheet" href="/css/polish.css" />
+  </head>
+  <body>
+    <div class="boot" id="boot" role="status" aria-live="polite">
+      <div class="boot-logo"><img src="/assets/vexora-emblem.png" alt="" width="78" height="78" /></div>
+      <div class="boot-mark">VEXORA</div>
+      <div class="boot-text">loading</div>
+      <div class="boot-bar"><span></span></div>
+    </div>
+    <div id="root"></div>
+    <script type="module" src="/js/main.js"></script>
+  </body>
+</html>
