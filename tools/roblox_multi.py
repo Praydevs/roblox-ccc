@@ -10,22 +10,28 @@ into the same server (game.JobId) so two accounts can trade with each other.
     python tools/roblox_multi.py --cli --launch --accounts main,alt --job <jobId>
 
 How it works: for each account it uses the .ROBLOSECURITY cookie to get an
-authentication ticket, resolves the join through PlaceLauncher.ashx, and opens the
-roblox-player: protocol URL. Nothing is patched and no client files are touched.
+authentication ticket and opens the roblox-player: protocol URL pointing at
+PlaceLauncher.ashx. Nothing is patched and no client files are touched.
 
-Roblox on Windows normally allows one client per user session. If a second launch
-just focuses the first window, sign the second account in under a separate Windows
-user (or a separate VM) instead of patching the client. Cookies live in
-tools/accounts.json, which is git-ignored; treat that file like a password.
+Windows lets Roblox open one client per session because the client grabs a named
+mutex (ROBLOX_singletonMutex) on startup. This tool takes that mutex first and holds
+it while launching, so a second client starts as its own window - the same trick the
+C++ multi-instance launchers use. If Roblox ever ignores it, enabling multi-instance
+in the tool still does no harm: the launch is retried without the lock and the log
+says so.
+
+Cookies live in tools/accounts.json, which is git-ignored; treat it like a password.
 """
 
 from __future__ import annotations
 
 import argparse
+import ctypes
 import http.cookiejar
 import json
 import os
 import random
+import re
 import subprocess
 import sys
 import threading
@@ -179,45 +185,139 @@ def auth_ticket(cookie: str, opener=None) -> str:
             )
 
 
+def parse_job(text: str | None) -> str | None:
+    """Accept a raw job id or a copied server link and return the id."""
+    value = (text or "").strip()
+    if not value:
+        return None
+    match = re.search(r"gameInstanceId=([0-9a-fA-F-]{8,40})", value)
+    if match:
+        value = match.group(1)
+    value = value.strip("/ ")
+    if re.fullmatch(r"[0-9a-fA-F]{32}", value):
+        return f"{value[:8]}-{value[8:12]}-{value[12:16]}-{value[16:20]}-{value[20:]}"
+    if re.fullmatch(r"[0-9a-fA-F-]{16,40}", value):
+        return value
+    raise RuntimeError(f"'{value}' is not a job id or a server link.")
+
+
 def launch_url(cookie: str, place_id: str, job_id: str | None = None) -> str:
-    opener = make_session(cookie)
-    ticket = auth_ticket(cookie, opener)
+    """Build the roblox-player: URL the website hands to the client.
+
+    PlaceLauncher is only *inside* the URL - the client calls it itself. Asking it
+    here as a pre-check failed on healthy servers (status None), so there is no
+    pre-check any more.
+    """
+    ticket = auth_ticket(cookie)
+    job = parse_job(job_id)
     tracker = str(random.randint(1_000_000_000, 9_999_999_999))
     params = {
         "browserTrackerId": tracker,
         "placeId": str(place_id),
         "isPlayTogetherGame": "false",
     }
-    if job_id:
+    if job:
         params["request"] = "RequestGameJob"
-        params["gameId"] = job_id
+        params["gameId"] = job
     else:
         params["request"] = "RequestGame"
 
-    url = f"{PLACE_LAUNCHER}?{urllib.parse.urlencode(params)}"
-    try:
-        with _request(url, opener=opener, headers={"AuthenticationTicket": ticket}) as res:
-            data = _json(res)
-    except urllib.error.HTTPError as err:
-        if err.code == 401:
-            raise RuntimeError("Cookie expired while resolving the server.")
-        raise RuntimeError(f"Join request failed: HTTP {err.code} {_body(err)}")
-
-    if data.get("status") != 2 or not data.get("joinScriptUrl"):
-        message = str(data.get("message") or "").strip()
-        if "full" in message.lower():
-            raise RuntimeError("That server is full.")
-        raise RuntimeError(message or f"Server not joinable (status {data.get('status')}).")
-
-    join_ticket = data.get("authenticationTicket") or ticket
+    launcher = f"{PLACE_LAUNCHER}?{urllib.parse.urlencode(params)}"
     return (
         "roblox-player:1+launchmode:play"
-        f"+gameinfo:{join_ticket}"
+        f"+gameinfo:{ticket}"
         f"+launchtime:{int(time.time() * 1000)}"
-        f"+placelauncherurl:{urllib.parse.quote(str(data['joinScriptUrl']), safe='')}"
+        f"+placelauncherurl:{urllib.parse.quote(launcher, safe='')}"
         f"+browsertrackerid:{tracker}"
         "+robloxLocale:en_us+gameLocale:en_us+channel:+LaunchExp:InApp"
     )
+
+
+# ---------- multiple windows ----------
+SINGLETON_MUTEX = "ROBLOX_singletonMutex"
+SINGLETON_EVENT = "ROBLOX_singletonEvent"
+
+
+class MultiInstance:
+    """Hold Roblox's single-instance objects so a second client can start.
+
+    The client opens a named mutex/event at startup and quits if it cannot. Owning
+    them here first is what every multi-instance launcher does; handles are closed
+    when the block exits or the process ends.
+    """
+
+    def __init__(self) -> None:
+        self.handles: list[int] = []
+
+    def __enter__(self) -> "MultiInstance":
+        if not sys.platform.startswith("win"):
+            return self
+        try:
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.CreateMutexW.restype = ctypes.c_void_p
+            kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
+            kernel32.CreateEventW.restype = ctypes.c_void_p
+            kernel32.CreateEventW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_bool, ctypes.c_wchar_p]
+            mutex = kernel32.CreateMutexW(None, True, SINGLETON_MUTEX)
+            event = kernel32.CreateEventW(None, True, True, SINGLETON_EVENT)
+            self.handles = [h for h in (mutex, event) if h]
+        except Exception:  # noqa: BLE001 - never block a launch over this
+            self.handles = []
+        return self
+
+    def __exit__(self, *exc) -> None:
+        for handle in self.handles:
+            try:
+                ctypes.WinDLL("kernel32").CloseHandle(ctypes.c_void_p(handle))
+            except Exception:  # noqa: BLE001
+                pass
+        self.handles = []
+
+
+def client_count() -> int:
+    """How many RobloxPlayerBeta.exe processes are running."""
+    if not sys.platform.startswith("win"):
+        return 0
+    try:
+        out = subprocess.run(
+            ["tasklist", "/fi", "IMAGENAME eq RobloxPlayerBeta.exe", "/fo", "csv", "/nh"],
+            capture_output=True, text=True, timeout=15,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return 0
+    return out.lower().count("robloxplayerbeta.exe")
+
+
+def wait_for_client(before: int, seconds: float) -> bool:
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        if client_count() > before:
+            return True
+        time.sleep(0.5)
+    return client_count() > before
+
+
+def launch_client(cookie: str, place: str, job: str | None = None, *, dry_run: bool = False,
+                  multi: bool = True, log=print) -> str:
+    """Resolve a ticket and start one client. Returns the protocol URL."""
+    before = client_count()
+    url = launch_url(cookie, place, job)
+    if dry_run:
+        log(f"would launch: {url[:120]}...")
+        return url
+
+    if multi:
+        with MultiInstance():
+            open_protocol(url)
+            if wait_for_client(before, 12):
+                return url
+        log("no new window with the instance lock held - retrying without it")
+
+    open_protocol(url)
+    if not wait_for_client(before, 20):
+        log("Roblox accepted the launch but no new RobloxPlayerBeta.exe appeared; "
+            "if a window only got focused, enable multi-instance or run the Store version")
+    return url
 
 
 def open_protocol(url: str, dry_run: bool = False) -> None:
@@ -348,10 +448,12 @@ def cli(args) -> int:
             return 2
         for index, account in enumerate(chosen):
             try:
-                url = launch_url(account["cookie"], args.place, args.job)
-                open_protocol(url, dry_run=args.dry_run)
-                print(f"launched {account['label']} ({account.get('username') or 'unknown'})"
-                      f" into place {args.place}{' job ' + args.job if args.job else ''}")
+                launch_client(account["cookie"], args.place, args.job,
+                              dry_run=args.dry_run, multi=args.multi,
+                              log=lambda m: print(f"  {m}"))
+                if not args.dry_run:
+                    print(f"opened {account['label']} ({account.get('username') or 'unknown'})"
+                          f" in place {args.place}{' job ' + args.job if args.job else ' (any server)'}")
             except RuntimeError as err:
                 print(f"failed {account['label']}: {err}", file=sys.stderr)
             if index < len(chosen) - 1 and args.delay:
@@ -438,12 +540,16 @@ class LauncherApp(tk.Tk):
         ttk.Checkbutton(right, text="Dry run (print, don't launch)", variable=self.dry).grid(
             row=4, column=0, columnspan=2, sticky="w", pady=6)
 
+        self.multi = tk.BooleanVar(value=True)
+        ttk.Checkbutton(right, text="Multi-instance lock (allows a 2nd window)",
+                        variable=self.multi).grid(row=5, column=0, columnspan=2, sticky="w")
+
         ttk.Button(right, text="Launch selected", command=self.launch_selected).grid(
-            row=5, column=0, columnspan=2, sticky="ew", pady=(6, 10))
+            row=6, column=0, columnspan=2, sticky="ew", pady=(6, 10))
 
         self.log = tk.Text(right, height=12, wrap="word", state="disabled", relief="flat", bg="#111", fg="#ddd")
-        self.log.grid(row=6, column=0, columnspan=2, sticky="nsew")
-        right.rowconfigure(6, weight=1)
+        self.log.grid(row=7, column=0, columnspan=2, sticky="nsew")
+        right.rowconfigure(7, weight=1)
 
         self.status = ttk.Label(self, text="Ready", padding=(12, 6))
         self.status.grid(row=2, column=0, sticky="ew")
@@ -576,17 +682,19 @@ class LauncherApp(tk.Tk):
         except ValueError:
             delay = 8
         dry = bool(self.dry.get())
+        multi = bool(self.multi.get())
 
         def work() -> None:
             for index, account in enumerate(chosen):
                 label = account["label"]
+                say = lambda m, l=label: self.after(0, lambda: self.write_log(f"{l}: {m}"))
                 try:
-                    self.after(0, lambda l=label: self.write_log(f"{l}: requesting ticket..."))
-                    url = launch_url(account["cookie"], place, job)
-                    open_protocol(url, dry_run=dry)
-                    self.after(0, lambda l=label: self.write_log(f"{l}: launched"))
+                    say("requesting ticket...")
+                    launch_client(account["cookie"], place, job, dry_run=dry,
+                                  multi=multi, log=say)
+                    say("launched" if not dry else "dry run ok")
                 except Exception as err:  # noqa: BLE001 - surface anything to the log
-                    self.after(0, lambda l=label, e=err: self.write_log(f"{l}: {e}"))
+                    say(str(err))
                 if index < len(chosen) - 1 and delay:
                     time.sleep(delay)
             self.after(0, lambda: self.status.configure(text="Launch run finished"))
@@ -610,6 +718,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--job", help="game.JobId to land every account in the same server")
     parser.add_argument("--delay", type=float, default=8.0)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--no-multi", dest="multi", action="store_false",
+                        help="launch without holding Roblox's single-instance lock")
+    parser.set_defaults(multi=True)
     args = parser.parse_args(argv)
 
     if args.cli:

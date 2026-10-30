@@ -199,14 +199,18 @@ python tools/roblox_multi.py --cli --add main --cookie "_|..."
 python tools/roblox_multi.py --cli --launch --accounts main,alt --job <jobId> --delay 8
 ```
 
-It uses the same flow as the server: cookie → authentication ticket →
-`PlaceLauncher.ashx` → `roblox-player:` URL. Nothing is patched.
+It uses the same flow as the server: cookie → authentication ticket → `roblox-player:` URL
+with `PlaceLauncher.ashx` inside it. Nothing is patched, no client files are touched.
 
 - Cookies are stored in `tools/accounts.json` (git-ignored, mode 600).
-- `--job` puts every account in the same `game.JobId`; omit it to join the place normally.
-- `--dry-run` resolves everything and prints the URL without opening a client.
-- Windows allows one Roblox client per user session; for the second client use another
-  Windows user or a VM rather than patching the binary.
+- `--job` (a raw id or a copied `?gameInstanceId=` server link) puts every account in the
+  same server. Omit it and each client joins any open server in that place.
+- `--dry-run` prints the protocol URL without opening a client.
+- **Two windows at once:** the launcher takes Roblox's `ROBLOX_singletonMutex` before
+  handing over the URL, which is what the C++ multi-instance tools do, so the second client
+  opens as its own window. The GUI has the same toggle; `--no-multi` turns it off. If a
+  launch produces no new `RobloxPlayerBeta.exe`, the launcher retries without the lock and
+  says so in the log instead of claiming success.
 
 ## Routes
 
