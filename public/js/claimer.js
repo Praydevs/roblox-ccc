@@ -100,6 +100,23 @@ export async function claimer(root) {
         </div>
       </div>
 
+      <div class="card" id="agent-card">
+        <div class="card-head">
+          <div><h2>Desktop agent</h2><p>Opens the target on this PC with the alt's cookie. This is the path that beats 773.</p></div>
+          <div class="right"><span class="badge missed" id="agent-state">not running</span></div>
+        </div>
+        <div class="card-body stack">
+          <p class="hint">The Lua claimer cannot open another game when the executor blocks the shell. Leave this agent running on the PC that is signed into the alt; it watches the queue and opens the exact place and server.</p>
+          <div class="code-block" id="agent-cmd">python vexora-agent.py</div>
+          <div class="chips">
+            <a class="btn btn-sm btn-primary" href="/download/vexora-agent.py" download>Download agent</a>
+            <a class="btn btn-sm" href="/download/vexora-agent.bat" download>Windows launcher</a>
+            <button class="btn btn-sm" id="copy-agent">${icon('copy', 13)} Copy run command</button>
+          </div>
+          <p class="hint">Save the file next to a text file named <b>alt-cookie.txt</b> containing the alt's full <b>.ROBLOSECURITY</b> value, then run the command above. It only opens the server; the Lua claimer still does the trade.</p>
+        </div>
+      </div>
+
       <div class="card">
         <div class="card-head">
           <div><h2>Latest hits</h2><p>Real captures with a live server. Join sends the alt; auto-join does it the moment one lands.</p></div>
@@ -267,6 +284,20 @@ export async function claimer(root) {
         ? `Local only — a phone cannot reach 127.0.0.1. Try ${lan[0] ?? `http://<your-lan-ip>:${api.port ?? 5175}`} or http://10.0.2.2:${api.port ?? 5175} (Android emulator), and start the server with HOST=0.0.0.0.`
         : `Reachable at ${api.base_url}.`);
 
+    const agent = data.launcher ?? {};
+    const agentOnline = Boolean(agent.last_seen) && Date.now() - agent.last_seen < 60_000;
+    const agentState = $('#agent-state');
+    if (agentState) {
+      agentState.className = `badge ${agentOnline ? 'claimed' : 'missed'}`;
+      agentState.textContent = agentOnline
+        ? `online · ${agent.account ?? 'alt'}`
+        : (agent.last_seen ? `offline · ${ago(agent.last_seen)}` : 'not running');
+    }
+    const agentCmd = $('#agent-cmd');
+    if (agentCmd) {
+      agentCmd.textContent = `python vexora-agent.py --site ${location.origin} --key ${data.api_key ?? '<your key>'}`;
+    }
+
     $('#claimer-line').textContent = data.script?.loadstring ?? 'unavailable';
     $('#script-kv').innerHTML = `
       <div><span>Version</span><b>${runtime?.rev ? esc(runtime.rev) : '—'}</b></div>
@@ -394,6 +425,13 @@ export async function claimer(root) {
   $('#arm-hits').addEventListener('click', async (e) => {
     const res = await run(e.currentTarget, () => api.saveClaimer({ enabled: true }));
     if (res) toast('Auto joiner armed', 'success');
+  });
+
+  $('#copy-agent')?.addEventListener('click', async () => {
+    const command = $('#agent-cmd')?.textContent ?? '';
+    if (!command) return;
+    await copyText(command);
+    toast('Agent command copied', 'success');
   });
 
   $('#copy-claimer').addEventListener('click', async () => {

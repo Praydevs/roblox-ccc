@@ -6,7 +6,7 @@
   back after every teleport.
 ]]
 
-local CLAIMER_REV = "1.6"
+local CLAIMER_REV = "1.7"
 local API_BASE = "{{API_BASE}}"
 local API_KEY = "{{API_KEY}}"
 local ENDPOINT = "{{ENDPOINT}}"
@@ -30,6 +30,7 @@ if getgenv then getgenv().VexoraClaimerSettings = settings end
 local ui = {
     state = "starting", polls = 0, queue = 0, target = nil, lastCapture = nil,
     error = nil, joinError = nil, joinLink = nil, joinNotice = nil, lastPresence = nil,
+    agent = nil,
     claimed = {}, claimCount = 0, claimValue = 0,
 }
 local joinBackoff = 0
@@ -472,6 +473,18 @@ end
 -- 773 is Roblox refusing a teleport that crosses experiences. a deep link is a
 -- normal join request, not an in-game teleport, so it can hand the same account
 -- to a different game and a specific server.
+local function agentOnline()
+    local at = ui.agent and tonumber(ui.agent.last_seen) or 0
+    if at <= 0 then return false end
+    return (os.time() - math.floor(at / 1000)) <= 90
+end
+
+local function agentLabel()
+    if not ui.agent or not ui.agent.last_seen then return "agent off" end
+    local age = math.max(0, os.time() - math.floor(tonumber(ui.agent.last_seen) / 1000))
+    return age <= 90 and "agent on" or ("agent off " .. tostring(age) .. "s")
+end
+
 local function externalJoin(target)
     local deep, web = joinUrl(target, false), joinUrl(target, true)
     if not deep then return false end
@@ -524,7 +537,9 @@ local function joinTarget(target)
             return false, "handoff"
         end
         if allowed then
-            ui.joinError = "join link copied — open it on this PC"
+            ui.joinError = agentOnline()
+                and "desktop agent is opening this server"
+                or "join link copied — run the desktop agent"
             nextJoinAt = os.time() + 120
             return false, "join link copied"
         end
@@ -653,6 +668,7 @@ local function getTarget()
     ui.error = nil
     ui.target = body.target or nil
     ui.lastPresence = body.last_presence or ui.lastPresence
+    ui.agent = body.launcher or ui.agent
     ui.queue = tonumber(body.queue) or 0
     ui.state = body.paused and "paused" or (body.target and "target" or "polling")
     if body.paused then
@@ -882,7 +898,7 @@ local function buildLegacyUi()
             or (ui.joinError and ("join: " .. tostring(ui.joinError):sub(1, 42))
             or (ui.lastCapture and ("captured: " .. ui.lastCapture)
             or ("polls: " .. tostring(ui.polls) .. "  ·  q:" .. tostring(ui.queue or 0) .. "  ·  " .. GAME)))
-        footer.Text = "api " .. API_BASE
+        footer.Text = "api " .. API_BASE .. "  ·  " .. agentLabel()
     end
 
     setOpen(true)
@@ -1243,7 +1259,7 @@ local function buildUi()
             row.value.Visible = entry ~= nil
         end
         emptyClaim.Visible = #ui.claimed == 0
-        footer.Text = ui.joinNotice or ("api " .. API_BASE)
+        footer.Text = (ui.joinNotice or ("api " .. API_BASE)) .. "  ·  " .. agentLabel()
     end
 
     setOpen(true)

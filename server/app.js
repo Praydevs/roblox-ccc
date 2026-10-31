@@ -428,6 +428,8 @@ const claimJobPayload = (j) => ({
   place_id: j.place_id,
   server_id: j.server_id,
   status: j.status,
+  launched_at: j.launched_at ?? null,
+  launcher: j.launcher ?? null,
   presence: j.presence === true,
   requester: j.requester ?? null,
 });
@@ -595,11 +597,16 @@ const api = {
     const account = String(url.searchParams.get('account') ?? '').replace(/[^a-zA-Z0-9_]/g, '').slice(0, 40);
     const here = String(url.searchParams.get('server') ?? '').replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 60);
     const cfg = u.claimer ?? {};
+    const launcher = {
+      last_seen: cfg.launcher_at ?? null,
+      account: cfg.launcher_account ?? null,
+      version: cfg.launcher_version ?? null,
+    };
 
     claimer.reap(u);
 
     if (!cfg.enabled) {
-      return json(res, 200, { ok: true, paused: true, account, target: null, queue: 0, last_presence: u.last_presence ?? null });
+      return json(res, 200, { ok: true, paused: true, account, target: null, queue: 0, last_presence: u.last_presence ?? null, launcher });
     }
 
     const jobs = store.claims(u.id);
@@ -607,6 +614,24 @@ const api = {
       ? jobs.find((j) => j.server_id === here && ['queued', 'joining', 'joined'].includes(j.status))
       : null;
     const wantMove = url.searchParams.get('move') === '1';
+
+    // The desktop agent watches the queue without taking a lease: it only needs
+    // the newest joinable target so it can open that server with the alt cookie.
+    // Leasing stays with the Lua poller, which is the one that trades.
+    if (url.searchParams.get('watch') === '1') {
+      const active = jobs.find((j) => ['queued', 'joining'].includes(j.status)
+          && j.created_at > Date.now() - 8 * 60_000 && j.place_id && j.server_id)
+        ?? jobs.find((j) => j.status === 'joined' && j.created_at > Date.now() - 8 * 60_000);
+      return json(res, 200, {
+        ok: true,
+        watch: true,
+        account,
+        target: active ? claimJobPayload(active) : null,
+        queue: jobs.filter((j) => j.status === 'queued').length,
+        last_presence: u.last_presence ?? null,
+        launcher,
+      });
+    }
 
     const markArrived = (job) => {
       if (job.status !== 'joined') {
@@ -617,7 +642,7 @@ const api = {
           error: null,
         });
       }
-      return json(res, 200, { ok: true, in_server: true, account, target: claimJobPayload(job), queue: 0, last_presence: u.last_presence ?? null });
+      return json(res, 200, { ok: true, in_server: true, account, target: claimJobPayload(job), queue: 0, last_presence: u.last_presence ?? null, launcher });
     };
 
     // already inside a flagged server: keep trading unless the alt asked to move on
@@ -644,13 +669,50 @@ const api = {
         target: claimJobPayload(next),
         queue: jobs.filter((j) => j.status === 'queued').length,
         last_presence: u.last_presence ?? null,
+        launcher,
       });
     }
 
     // nothing new to chase - stay in the current server and keep trading
     if (current) return markArrived(current);
 
-    return json(res, 200, { ok: true, target: null, account, queue: 0, last_presence: u.last_presence ?? null });
+    return json(res, 200, { ok: true, target: null, account, queue: 0, last_presence: u.last_presence ?? null, launcher });
+  },
+
+  'POST /api/claimer/target/:id/launched': async (req, res, url, params) => {
+    const u = apiKeyUser(req, url);
+    if (!u) return json(res, 401, { error: 'Unknown API key' });
+    if (u.role !== 'admin') return json(res, 403, { error: 'Auto claimer is admin only' });
+    const job = store.claims(u.id).find((j) => j.id === params.id);
+    if (!job) return json(res, 404, { error: 'Target not found' });
+
+    const body = await readBody(req).catch(() => ({}));
+    const account = String(body.account ?? '').replace(/[^a-zA-Z0-9_]/g, '').slice(0, 40);
+    store.updateClaim(job.id, {
+      launched_at: Date.now(),
+      launcher: String(body.launcher ?? 'desktop').replace(/[^a-zA-Z0-9_.-]/g, '').slice(0, 40) || 'desktop',
+    });
+
+    u.claimer ??= {};
+    u.claimer.launcher_at = Date.now();
+    if (account) u.claimer.launcher_account = account;
+    u.claimer.launcher_version = String(body.version ?? '').replace(/[^a-zA-Z0-9_.-]/g, '').slice(0, 20) || null;
+    store.saveUser(u);
+    return json(res, 200, { ok: true });
+  },
+
+  'POST /api/claimer/launcher': async (req, res, url) => {
+    const u = apiKeyUser(req, url);
+    if (!u) return json(res, 401, { error: 'Unknown API key' });
+    if (u.role !== 'admin') return json(res, 403, { error: 'Auto claimer is admin only' });
+    const body = await readBody(req).catch(() => ({}));
+    u.claimer ??= {};
+    u.claimer.launcher_at = Date.now();
+    const account = String(body.account ?? '').replace(/[^a-zA-Z0-9_]/g, '').slice(0, 40);
+    if (account) u.claimer.launcher_account = account;
+    u.claimer.launcher_version = String(body.version ?? '').replace(/[^a-zA-Z0-9_.-]/g, '').slice(0, 20) || null;
+    store.saveUser(u);
+    return json(res, 200, { ok: true, enabled: Boolean(u.claimer.enabled) });
   },
 
   'POST /api/claimer/target/:id/arrived': async (req, res, url, params) => {

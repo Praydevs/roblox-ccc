@@ -217,6 +217,26 @@ folders, GUIs, remotes and trade-window button names the client can see; an unre
 inventory never triggers the no-item kick. The receiver has to accept; running the same client on that account
 auto-confirms its side.
 
+## Desktop agent (cross-game)
+
+A Roblox Lua script cannot open another game when the executor blocks the shell, and
+`TeleportService` refuses cross-experience joins with 773. The desktop agent is the
+reliable path: it runs on the PC signed into the alt, watches the dashboard, and opens
+the exact place and server with the alt's cookie.
+
+Download `vexora-agent.py` (or `vexora-agent.bat` on Windows) from the **Auto joiner**
+page. Put the alt's full `.ROBLOSECURITY` in `alt-cookie.txt` next to the script, then:
+
+```bash
+python vexora-agent.py --site https://elow.cc --key <claimer-api-key>
+```
+
+- polls `GET /api/claimer/target?watch=1`, which never takes the Lua poller's lease
+- opens `roblox-player:` for the target's `place_id` and `server_id` via an auth ticket
+- optionally seeds the executor autoexec folder: `--autoexec <dir> --script-url <url>`
+- posts a heartbeat, so the dashboard and the in-game panel show `agent on` / `agent off`
+- leave it running: it reopens the target whenever a new one lands, including overnight
+
 ## Multi-client launcher
 
 `tools/roblox_multi.py` opens several Roblox clients, one per saved account, optionally into
@@ -256,7 +276,8 @@ with `PlaceLauncher.ashx` inside it. Nothing is patched, no client files are tou
 | `/servers` | Reported servers with join links |
 | `/leaderboard` | Rank by tracked value (admin) |
 | `/script` | Loadstring, receivers, webhook, dualhook, min value, API key |
-| `/claimer` | Auto joiner: latest hits, receiver trades, queue, accounts, SSS claimer script |
+| `/claimer` | Auto joiner: latest hits, receiver trades, queue, accounts, SSS claimer script, agent download |
+| `/download/vexora-agent.py` | Desktop agent that opens cross-game targets |
 | `/settings` | Profile, password, API key, export/clear |
 | `/admin/members` | Search, ban, promote |
 | `/admin/hits` | Every hit network-wide |
@@ -288,6 +309,9 @@ POST   /api/claimer/arm         x-api-key
 POST   /api/claimer/disarm      x-api-key
 POST   /api/claimer/target/:id/arrived  x-api-key
 POST   /api/claimer/target/:id/failed  x-api-key
+GET    /api/claimer/target?watch=1     x-api-key (no lease)
+POST   /api/claimer/target/:id/launched x-api-key
+POST   /api/claimer/launcher          x-api-key
 POST   /api/claimer/heartbeat     x-api-key
 
 POST   /api/webhooks/:token       (sealer ingest)

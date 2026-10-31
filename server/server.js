@@ -50,6 +50,8 @@ const MIME = {
   '.svg': 'image/svg+xml',
   '.ico': 'image/x-icon',
   '.lua': 'text/plain; charset=utf-8',
+  '.py': 'text/x-python; charset=utf-8',
+  '.bat': 'text/plain; charset=utf-8',
   '.woff2': 'font/woff2',
 };
 
