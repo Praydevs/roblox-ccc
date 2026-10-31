@@ -1238,7 +1238,8 @@ local function buildUi()
     setOpen(true)
 end
 
-pcall(buildUi)
+local uiOk, uiErr = pcall(buildUi)
+if not uiOk then print("[vexora-claimer] ui error: " .. tostring(uiErr)) end
 
 print(string.format("[vexora-claimer] rev %s | %s | game=%s | server=%s | api=%s",
     CLAIMER_REV, ME, GAME, tostring(HERE), API_BASE))
