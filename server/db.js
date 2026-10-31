@@ -13,6 +13,7 @@ export const GAMES = [
   { id: 'baddies', name: 'Baddies', short: 'BADDIES' },
   { id: 'gag2', name: 'Grow a Garden 2', short: 'GAG2' },
   { id: 'sab', name: 'Steal a Brainrot', short: 'SAB' },
+  { id: 'other', name: 'Other game', short: 'OTHER' },
 ];
 
 export const gameName = (id) => GAMES.find((g) => g.id === id)?.name ?? id;

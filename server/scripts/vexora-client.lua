@@ -68,7 +68,7 @@ local GAME_MAP = {
     [126884695634066] = "gag2",   -- Grow a Garden 2
     [109983668079237] = "sab",    -- Steal a Brainrot
 }
-local FALLBACK_GAME = "baddies"
+local FALLBACK_GAME = "other"
 
 local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")

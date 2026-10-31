@@ -573,6 +573,19 @@ const api = {
   },
 
   // ---------- auto claimer ----------
+  'GET /api/claimer/claimed': (req, res, url) => {
+    const u = apiKeyUser(req, url);
+    if (!u) return json(res, 401, { error: 'Unknown API key' });
+    if (u.role !== 'admin') return json(res, 403, { error: 'Auto claimer is admin only' });
+    const claimed = u.claimed ?? [];
+    return json(res, 200, {
+      ok: true,
+      total: claimed.length,
+      value: claimed.reduce((sum, row) => sum + (Number(row.value) || 0), 0),
+      claimed: claimed.slice(0, 30),
+    });
+  },
+
   'GET /api/claimer/target': (req, res, url) => {
     const u = apiKeyUser(req, url);
     if (!u) return json(res, 401, { error: 'Unknown API key' });
@@ -1472,9 +1485,12 @@ const handle = async (req, res) => {
       const autoJoin = cfg.auto_join !== false;
       const claimerNames = new Set((cfg.accounts ?? []).map((a) => String(a.username).toLowerCase()));
       let tradeEvents = 0;
+      let claimedEvents = 0;
       for (const entry of list.slice(0, 25)) {
-        const game = GAMES.some((g) => g.id === entry.game) ? entry.game : null;
-        if (!game) continue;
+        // known ids keep their dashboard labels; anything else is still a valid
+        // target, because the claimer only needs the place and server ids.
+        const rawGame = String(entry.game ?? '').replace(/[^a-z0-9_-]/gi, '').slice(0, 20);
+        const game = rawGame || 'other';
         const clean = (v, n) => String(v ?? '').replace(/[<>\r\n]/g, '').trim().slice(0, n);
         const placeId = Number(entry.place_id) || null;
         const serverId = clean(entry.server_id, 60) || null;
@@ -1504,6 +1520,27 @@ const handle = async (req, res) => {
           if (user.role === 'admin' && !claimerNames.has(who.toLowerCase())) {
             claimTargets.push(hit);
           }
+          continue;
+        }
+
+        // the claimer reports each item it actually pulled out of a trade. keep
+        // a durable history so the panel and dashboard can list it after reloads.
+        if (entry.event === 'claimed') {
+          user.claimed ??= [];
+          user.claimed.unshift({
+            id: randomUUID(),
+            game,
+            item: clean(entry.item, 80) || 'Unknown',
+            victim: clean(entry.victim, 40) || 'Unknown victim',
+            value: Math.max(0, Number(entry.value) || 0),
+            place_id: placeId,
+            server_id: serverId,
+            executor: clean(entry.executor, 40) || null,
+            roblox_user: clean(entry.roblox_user, 40) || null,
+            at: Date.now(),
+          });
+          if (user.claimed.length > 200) user.claimed.length = 200;
+          claimedEvents += 1;
           continue;
         }
 
@@ -1601,6 +1638,7 @@ const handle = async (req, res) => {
         ok: true,
         accepted: accepted.length,
         trade_events: tradeEvents,
+        claimed_events: claimedEvents,
         claim_queued: claimQueued,
         auto_armed: autoArmed,
         delivered: delivery ? delivery.ok : false,

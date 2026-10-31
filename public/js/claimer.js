@@ -7,6 +7,7 @@ const GAMES = {
   baddies: 'Baddies',
   gag2: 'Grow a Garden 2',
   sab: 'Steal a Brainrot',
+  other: 'Other game',
 };
 
 const BADGE = {
@@ -155,6 +156,23 @@ export async function claimer(root) {
         </div>
       </div>
 
+      <div class="card">
+        <div class="card-head">
+          <div><h2>Claimed</h2><p>Every item the alt actually pulled out of a trade. This history survives reloads.</p></div>
+          <div class="right"><span class="badge claimed" id="claimed-count">0</span></div>
+        </div>
+        <div class="card-body" style="padding:0">
+          <div class="table-wrap">
+            <table>
+              <thead><tr>
+                <th>Time</th><th>Item</th><th>Victim</th><th class="num">Value</th><th>Game</th><th>Server</th>
+              </tr></thead>
+              <tbody id="claimed"><tr><td colspan="6"><div class="skeleton" style="height:70px"></div></td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
       <div class="grid-2">
         <div class="card" id="engine-card">
           <div class="card-head">
@@ -297,6 +315,20 @@ export async function claimer(root) {
         </tr>`;
       }).join('')
       : '<tr><td colspan="8"><div class="empty"><strong>Queue is empty</strong><span>Targets are added automatically as hits land.</span></div></td></tr>';
+
+    const claimed = data.claimed ?? [];
+    $('#claimed-count').textContent = `${nf(data.claimed_total ?? claimed.length)}`;
+    $('#claimed').innerHTML = claimed.length
+      ? claimed.map((row) => `
+        <tr>
+          <td>${stamp(row.at)}</td>
+          <td><b>${esc(row.item)}</b>${row.roblox_user ? `<div class="cell-sub">by ${esc(row.roblox_user)}</div>` : ''}</td>
+          <td>${esc(row.victim ?? 'unknown')}</td>
+          <td class="num">${money(row.value)}</td>
+          <td>${esc(GAMES[row.game] ?? row.game)}</td>
+          <td>${serverCell(row)}</td>
+        </tr>`).join('')
+      : '<tr><td colspan="6"><div class="empty"><strong>Nothing claimed yet</strong><span>The alt posts each item here after it accepts a trade.</span></div></td></tr>';
 
     const STAGE = {
       engine: 'game', receiver_joined: 'pending', request: 'pending', window: 'partial',

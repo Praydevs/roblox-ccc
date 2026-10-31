@@ -368,6 +368,9 @@ export function createClaimer({
       detected_paths: detectedAutoexecDirs(),
       min_value: Number(cfg.min_value) || 0,
       trades: (user.trades ?? []).slice(0, 20),
+      claimed: (user.claimed ?? []).slice(0, 30),
+      claimed_total: (user.claimed ?? []).length,
+      claimed_value: (user.claimed ?? []).reduce((sum, row) => sum + (Number(row.value) || 0), 0),
       accounts: accountsOf(user).map((a) => ({
         id: a.id,
         username: a.username,

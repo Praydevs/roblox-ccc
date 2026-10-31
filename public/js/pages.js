@@ -8,6 +8,7 @@ const GAME_LABELS = {
   baddies: 'Baddies',
   gag2: 'Grow a Garden 2',
   sab: 'Steal a Brainrot',
+  other: 'Other game',
 };
 
 const head = (title, subtitle, actions = '') => `
