@@ -489,7 +489,9 @@ local function externalJoin(target)
         end
     end
 
-    if not launched then copyText(web) end
+    -- keep the link on the clipboard either way: a browser or a refused shell
+    -- command still leaves the user one paste away from the target
+    copyText(web)
     print(string.format("[vexora-claimer] external join %s | %s", launched and "opened" or "copied", web))
     return launched
 end
