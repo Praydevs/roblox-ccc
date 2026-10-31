@@ -6,7 +6,7 @@
   back after every teleport.
 ]]
 
-local CLAIMER_REV = "1.3"
+local CLAIMER_REV = "1.4"
 local API_BASE = "{{API_BASE}}"
 local API_KEY = "{{API_KEY}}"
 local ENDPOINT = "{{ENDPOINT}}"
@@ -27,7 +27,7 @@ if settings.autoAccept == nil then settings.autoAccept = AUTO_ACCEPT end
 settings.enabled = settings.autoExecute
 if getgenv then getgenv().VexoraClaimerSettings = settings end
 
-local ui = { state = "starting", polls = 0, target = nil, lastCapture = nil, error = nil, joinError = nil }
+local ui = { state = "starting", polls = 0, queue = 0, target = nil, lastCapture = nil, error = nil, joinError = nil }
 local joinBackoff = 0
 local nextJoinAt = 0
 
@@ -435,16 +435,34 @@ local function joinTarget(target)
     teleportError = nil
     ui.state = "joining"
     ui.joinError = nil
+    local crossGame = tonumber(target.place_id) ~= PLACE_ID
+    if crossGame then
+        ui.joinError = "cross-game: run the claimer inside that game"
+    end
     heartbeat("joining", target.server_id)
 
     local beforeJob, beforePlace = game.JobId, game.PlaceId
 
     -- only real targeted calls. a plain Teleport(placeId) would drop the alt in
     -- a random server and look like it never moved to the flagged one.
-    local attempts = {
-        function() TeleportService:TeleportToPlaceInstance(placeId, target.server_id, LocalPlayer) end,
-        function() TeleportService:TeleportToPlaceInstance(placeId, target.server_id) end,
-    }
+    local asyncAttempt = function()
+        local options = Instance.new("TeleportOptions")
+        options.ServerInstanceId = target.server_id
+        TeleportService:TeleportAsync(placeId, { LocalPlayer }, options)
+    end
+    local legacyWithPlayer = function()
+        TeleportService:TeleportToPlaceInstance(placeId, target.server_id, LocalPlayer)
+    end
+    local legacyNoPlayer = function()
+        TeleportService:TeleportToPlaceInstance(placeId, target.server_id)
+    end
+
+    -- TeleportToPlaceInstance is the call executors reliably expose inside the
+    -- same game. cross-game targets get TeleportAsync first because the legacy
+    -- call is the one Roblox refuses across experiences.
+    local attempts = crossGame
+        and { asyncAttempt, legacyWithPlayer, legacyNoPlayer }
+        or { legacyWithPlayer, legacyNoPlayer, asyncAttempt }
 
     local started, lastError = false, nil
     for index, attempt in ipairs(attempts) do
@@ -459,6 +477,7 @@ local function joinTarget(target)
 
     if not started then
         local message = lastError or "TeleportToPlaceInstance is unavailable"
+        if crossGame then message = message .. " (cross-game: run inside the target game)" end
         reportJoinFailure(target, message)
         joinBackoff = math.min(JOIN_BACKOFF_MAX, joinBackoff > 0 and joinBackoff * 2 or 5)
         nextJoinAt = os.time() + joinBackoff
@@ -485,6 +504,7 @@ local function joinTarget(target)
     local failure = teleportError
     teleportError = nil
     if failure then
+        if crossGame then failure = failure .. " (cross-game: run inside the target game)" end
         reportJoinFailure(target, failure)
         joinBackoff = math.min(JOIN_BACKOFF_MAX, joinBackoff > 0 and joinBackoff * 2 or 5)
         nextJoinAt = os.time() + joinBackoff
@@ -493,12 +513,14 @@ local function joinTarget(target)
         return false, failure
     end
 
-    reportJoinFailure(target, "teleport did not start")
+    local dropped = "teleport did not start"
+    if crossGame then dropped = dropped .. " (cross-game: run inside the target game)" end
+    reportJoinFailure(target, dropped)
     joinBackoff = math.min(JOIN_BACKOFF_MAX, joinBackoff > 0 and joinBackoff * 2 or 5)
     nextJoinAt = os.time() + joinBackoff
     ui.state = "failed"
-    ui.joinError = "teleport did not start"
-    return false, "teleport did not start"
+    ui.joinError = dropped
+    return false, dropped
 end
 
 --[[ ---- poll loop ---- ]]
@@ -538,7 +560,8 @@ local function getTarget()
     end
     local body = res.body
     ui.error = nil
-    if body.target then ui.target = body.target end
+    ui.target = body.target or nil
+    ui.queue = tonumber(body.queue) or 0
     ui.state = body.paused and "paused" or (body.target and "target" or "polling")
     if body.paused then
         ui.error = "joiner is off on the dashboard"
@@ -744,7 +767,7 @@ local function buildUi()
         captureLabel.Text = ui.error and ("error: " .. tostring(ui.error):sub(1, 46))
             or (ui.joinError and ("join: " .. tostring(ui.joinError):sub(1, 42))
             or (ui.lastCapture and ("captured: " .. ui.lastCapture)
-            or ("polls: " .. tostring(ui.polls) .. "  ·  " .. GAME)))
+            or ("polls: " .. tostring(ui.polls) .. "  ·  q:" .. tostring(ui.queue or 0) .. "  ·  " .. GAME)))
         footer.Text = "api " .. API_BASE
     end
 

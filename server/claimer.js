@@ -320,7 +320,7 @@ export function createClaimer({
       if (state.busy || Date.now() < state.nextAllowedAt) return;
       const job = nextJob(user);
       if (!job) continue;
-      if ((job.value ?? 0) < (cfg.min_value ?? 0)) {
+      if (!job.presence && (job.value ?? 0) < (cfg.min_value ?? 0)) {
         store.updateClaim(job.id, { status: 'skipped', finished_at: Date.now(), error: 'below claimer min value' });
         continue;
       }
@@ -443,6 +443,7 @@ export function createClaimer({
       server_id: job.server_id,
       requester: job.roblox_user ?? null,
       executor: job.executor ?? null,
+      presence: job.presence === true,
       status: 'queued',
       attempts: 0,
       account_id: null,
