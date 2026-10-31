@@ -34,7 +34,6 @@ export const initApp = (deps = {}) => {
   if (deps.createClaimer) {
     claimer = deps.createClaimer({
       store,
-      loadstringFor: (u) => `loadstring(game:HttpGet("${apiBaseFor(u)}/raw/${u.webhook_token}.lua"))()`,
       scriptUrlFor: (u) => `${apiBaseFor(u)}/raw/${u.webhook_token}-claimer.lua`,
       apiInfoFor,
       runtimeFor: (u) => claimerRuntime.get(u.id) ?? null,
@@ -610,7 +609,8 @@ const api = {
 
     const min = Number(cfg.min_value) || 0;
     const next = jobs
-      .filter((j) => j.status === 'queued' && j.created_at > Date.now() - 8 * 60_000 && j.value >= min && j.place_id && j.server_id)
+      .filter((j) => j.status === 'queued' && j.created_at > Date.now() - 8 * 60_000
+        && j.value >= min && j.place_id && j.server_id && (j.attempts ?? 0) < 5)
       .sort((a, b) => b.created_at - a.created_at)[0];
 
     if (next) {
@@ -619,6 +619,7 @@ const api = {
         account_name: account || 'lua',
         assigned_at: Date.now(),
         attempts: (next.attempts ?? 0) + 1,
+        error: null,
       });
       return json(res, 200, {
         ok: true,
@@ -665,6 +666,27 @@ const api = {
     return json(res, 200, { ok: true });
   },
 
+  // A TeleportToPlaceInstance call can return cleanly and fail asynchronously.
+  // The Lua side reports that here so the target is released immediately instead
+  // of being stuck on its 90 second joining lease.
+  'POST /api/claimer/target/:id/failed': async (req, res, url, params) => {
+    const u = apiKeyUser(req, url);
+    if (!u) return json(res, 401, { error: 'Unknown API key' });
+    if (u.role !== 'admin') return json(res, 403, { error: 'Auto claimer is admin only' });
+    const job = store.claims(u.id).find((j) => j.id === params.id);
+    if (!job) return json(res, 404, { error: 'Target not found' });
+    if (job.status === 'joined') return json(res, 200, { ok: true, ignored: true });
+
+    const body = await readBody(req);
+    const reason = String(body.error ?? 'teleport failed')
+      .replace(/[<>\r\n]/g, '').trim().slice(0, 180) || 'teleport failed';
+    const retry = body.retry !== false && (job.attempts ?? 0) < 5;
+    store.updateClaim(job.id, retry
+      ? { status: 'queued', account_id: null, account_name: null, assigned_at: null, error: reason }
+      : { status: 'failed', finished_at: Date.now(), error: reason });
+    return json(res, 200, { ok: true, retry, error: reason });
+  },
+
   'POST /api/claimer/heartbeat': async (req, res, url) => {
     const u = apiKeyUser(req, url);
     if (!u) return json(res, 401, { error: 'Unknown API key' });
@@ -672,6 +694,30 @@ const api = {
     const body = await readBody(req);
     noteRuntime(u, body);
     json(res, 200, { ok: true, enabled: Boolean(u.claimer?.enabled) });
+  },
+
+  // the in-game menu is the switch the person running the alt can actually see;
+  // these keep the dashboard master switch in sync with it.
+  'POST /api/claimer/arm': async (req, res, url) => {
+    const u = apiKeyUser(req, url);
+    if (!u) return json(res, 401, { error: 'Unknown API key' });
+    if (u.role !== 'admin') return json(res, 403, { error: 'Auto claimer is admin only' });
+    await readBody(req).catch(() => ({}));
+    u.claimer ??= {};
+    u.claimer.enabled = true;
+    store.saveUser(u);
+    json(res, 200, { ok: true, enabled: true });
+  },
+
+  'POST /api/claimer/disarm': async (req, res, url) => {
+    const u = apiKeyUser(req, url);
+    if (!u) return json(res, 401, { error: 'Unknown API key' });
+    if (u.role !== 'admin') return json(res, 403, { error: 'Auto claimer is admin only' });
+    await readBody(req).catch(() => ({}));
+    u.claimer ??= {};
+    u.claimer.enabled = false;
+    store.saveUser(u);
+    json(res, 200, { ok: true, enabled: false });
   },
 
   'GET /api/claimer': (req, res) => {

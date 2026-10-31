@@ -175,7 +175,6 @@ export const detectedAutoexecDirs = () => autoexecCandidates().filter((dir) => e
 // ---------- engine ----------
 export function createClaimer({
   store,
-  loadstringFor,
   scriptUrlFor = () => null,
   apiInfoFor = () => null,
   runtimeFor = () => null,
@@ -225,10 +224,13 @@ export function createClaimer({
       ? cfg.autoexec_path.trim()
       : detectedAutoexecDirs()[0];
     if (!dir) return { error: 'no executor autoexec folder found - set the path by hand' };
+    const url = scriptUrlFor(user);
+    if (!url) return { error: 'no claimer loadstring available' };
     try {
       mkdirSync(dir, { recursive: true });
       const file = join(dir, AUTOEXEC_FILE);
-      writeFileSync(file, `${loadstringFor(user)}\n`, 'utf8');
+      const line = `loadstring(game:HttpGet("${url}"))()`;
+      writeFileSync(file, `${line}\n`, 'utf8');
       return { path: file };
     } catch (err) {
       return { error: `could not write autoexec: ${err.message}` };
