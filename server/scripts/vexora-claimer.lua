@@ -6,7 +6,7 @@
   back after every teleport.
 ]]
 
-local CLAIMER_REV = "1.5"
+local CLAIMER_REV = "1.6"
 local API_BASE = "{{API_BASE}}"
 local API_KEY = "{{API_KEY}}"
 local ENDPOINT = "{{ENDPOINT}}"
