@@ -255,6 +255,7 @@ export async function claimer(root) {
       <div><span>State</span><b>${runtime ? esc(runtime.state) : '—'}</b></div>
       <div><span>Account</span><b>${runtime?.account ? esc(runtime.account) : '—'}</b></div>
       <div><span>Server</span><b>${runtime?.server ? esc(String(runtime.server).slice(0, 10)) + '…' : '—'}</b></div>
+      <div><span>Client</span><b>${data.last_presence ? `${esc(data.last_presence.roblox_user ?? 'client')} · ${ago(data.last_presence.at)}` : 'none'}</b></div>
       <div><span>Running</span><b>${nf(data.queue.queued)} queued · ${nf(data.queue.joined_today)} joined today</b></div>
       ${runtime?.error ? `<div><span>Error</span><b style="color:#fda4a4">${esc(runtime.error)}</b></div>` : ''}`;
 

@@ -325,7 +325,7 @@ local Vexora = {
 -- tell the dashboard which server this client is on before any item is captured.
 -- the alt can then join and open a trade even when nobody has traded yet.
 function Vexora.presence()
-    if IS_CLAIMER or not SERVER_ID then return false end
+    if not SERVER_ID then return false end
     table.insert(queue, {
         event = "presence",
         game = GAME,

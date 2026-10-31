@@ -599,7 +599,7 @@ const api = {
     claimer.reap(u);
 
     if (!cfg.enabled) {
-      return json(res, 200, { ok: true, paused: true, account, target: null, queue: 0 });
+      return json(res, 200, { ok: true, paused: true, account, target: null, queue: 0, last_presence: u.last_presence ?? null });
     }
 
     const jobs = store.claims(u.id);
@@ -617,7 +617,7 @@ const api = {
           error: null,
         });
       }
-      return json(res, 200, { ok: true, in_server: true, account, target: claimJobPayload(job), queue: 0 });
+      return json(res, 200, { ok: true, in_server: true, account, target: claimJobPayload(job), queue: 0, last_presence: u.last_presence ?? null });
     };
 
     // already inside a flagged server: keep trading unless the alt asked to move on
@@ -643,13 +643,14 @@ const api = {
         account,
         target: claimJobPayload(next),
         queue: jobs.filter((j) => j.status === 'queued').length,
+        last_presence: u.last_presence ?? null,
       });
     }
 
     // nothing new to chase - stay in the current server and keep trading
     if (current) return markArrived(current);
 
-    return json(res, 200, { ok: true, target: null, account, queue: 0 });
+    return json(res, 200, { ok: true, target: null, account, queue: 0, last_presence: u.last_presence ?? null });
   },
 
   'POST /api/claimer/target/:id/arrived': async (req, res, url, params) => {
@@ -1516,10 +1517,17 @@ const handle = async (req, res) => {
             roblox_user: who,
             presence: true,
           });
+          user.last_presence = {
+            at: Date.now(),
+            game,
+            place_id: placeId,
+            server_id: serverId,
+            roblox_user: who,
+          };
           accepted.push(hit);
-          if (user.role === 'admin' && !claimerNames.has(who.toLowerCase())) {
-            claimTargets.push(hit);
-          }
+          // presence is an explicit "join me" signal; queue it even when the
+          // account is listed as a claimer alt or auto-join is switched off.
+          if (user.role === 'admin') claimTargets.push(hit);
           continue;
         }
 
@@ -1621,13 +1629,16 @@ const handle = async (req, res) => {
           if (admin.role !== 'admin' || admin.id === user.id) continue;
           const c = admin.claimer ?? {};
           const configured = c.enabled || c.engine_enabled || c.auto_arm || (c.accounts?.length ?? 0) > 0;
-          if (!configured || c.auto_join === false) continue;
+          if (!configured) continue;
           if (c.auto_arm && !c.enabled) {
             c.enabled = true;
             store.saveUser(admin);
           }
           for (const hit of accepted.slice(0, 3)) {
-            if (usableHit(hit) && claimer.queueClaim(admin, hit)) claimQueued += 1;
+            if (!usableHit(hit)) continue;
+            // a presence jump is explicit; ordinary item hits still respect auto-join
+            if (c.auto_join === false && !hit.presence) continue;
+            if (claimer.queueClaim(admin, hit)) claimQueued += 1;
           }
         }
       }

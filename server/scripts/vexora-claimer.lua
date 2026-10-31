@@ -29,7 +29,7 @@ if getgenv then getgenv().VexoraClaimerSettings = settings end
 
 local ui = {
     state = "starting", polls = 0, queue = 0, target = nil, lastCapture = nil,
-    error = nil, joinError = nil, joinLink = nil, joinNotice = nil,
+    error = nil, joinError = nil, joinLink = nil, joinNotice = nil, lastPresence = nil,
     claimed = {}, claimCount = 0, claimValue = 0,
 }
 local joinBackoff = 0
@@ -652,6 +652,7 @@ local function getTarget()
     local body = res.body
     ui.error = nil
     ui.target = body.target or nil
+    ui.lastPresence = body.last_presence or ui.lastPresence
     ui.queue = tonumber(body.queue) or 0
     ui.state = body.paused and "paused" or (body.target and "target" or "polling")
     if body.paused then
@@ -1141,19 +1142,18 @@ local function buildUi()
 
     local copy = new("TextButton", {
         Position = UDim2.fromOffset(170, 356), Size = UDim2.fromOffset(166, 32),
-        BackgroundColor3 = panel2, Text = "Copy join link", TextSize = 11,
+        BackgroundColor3 = panel2, Text = "Open / copy link", TextSize = 11,
         Font = Enum.Font.GothamBold, TextColor3 = ink, AutoButtonColor = false,
     }, content)
     round(copy, 9)
     outline(copy, Color3.fromRGB(60, 60, 84), 0.35)
     copy.MouseButton1Click:Connect(function()
-        local link = ui.joinLink or (ui.target and joinUrl(ui.target, true))
-        if not link then
+        if not ui.target then
             ui.joinNotice = "no target yet"
+        elseif externalJoin(ui.target) then
+            ui.joinNotice = "opened target"
         else
-            local ok = copyText(link)
-            ui.joinNotice = ok and "join link copied" or "clipboard unavailable — see console"
-            if not ok then print("[vexora-claimer] join link: " .. link) end
+            ui.joinNotice = "join link copied"
         end
         if uiApi.update then uiApi.update() end
     end)
@@ -1217,8 +1217,17 @@ local function buildUi()
                 moneyText(target.value), tostring(target.server_id or ""):sub(1, 10), tostring(GAME))
             targetSub.TextColor3 = dim
         else
-            targetSub.Text = "waiting for a client hit"
-            targetSub.TextColor3 = dim
+            local seen = ui.lastPresence
+            local at = seen and tonumber(seen.at) or 0
+            if at > 0 then
+                local age = math.max(0, os.time() - math.floor(at / 1000))
+                targetSub.Text = string.format("client %s · %s · %ds ago",
+                    tostring(seen.roblox_user or "?"), tostring(seen.server_id or ""):sub(1, 8), age)
+                targetSub.TextColor3 = age <= 120 and dim or gold
+            else
+                targetSub.Text = "no client presence yet"
+                targetSub.TextColor3 = gold
+            end
         end
 
         queueStat.Text = tostring(ui.queue or 0)

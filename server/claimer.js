@@ -362,6 +362,7 @@ export function createClaimer({
       },
       api: apiInfoFor(user),
       runtime: runtimeFor(user),
+      last_presence: user.last_presence ?? null,
       hits: hitsFor(user),
       autoexec: cfg.autoexec !== false,
       autoexec_path: cfg.autoexec_path ?? null,
